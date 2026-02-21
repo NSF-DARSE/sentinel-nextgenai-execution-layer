@@ -23,6 +23,9 @@ services:
     depends_on:
       - postgres
       - redis
+    environment:
+      DATABASE_URL: postgresql+psycopg://sentinel:sentinel@postgres:5432/sentinel 
+    
 
 volumes:
   pgdata:
