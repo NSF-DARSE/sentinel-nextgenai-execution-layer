@@ -57,6 +57,56 @@ PDFs → **safe redaction** → **LLM-based structured extraction (redacted only
 
 ## Repository Structure
 ...
+```mermaid
+graph LR
+    %% Node Definitions
+    UI["💻 Front-End<br/>Customer / Business view<br/>Streamlit"]
+    API["⚙️ API Gateway<br/>FastAPI"]
+    Q["📥 Queue / Broker<br/>Redis"]
+    ENG["🧠 Sentinel Engine<br/>Celery Workers"]
+
+    subgraph DATA [Data Layer]
+        S3["🗄️ MinIO / S3<br/>Raw PDFs & Artifacts"]
+        PG["🐘 Postgres<br/>Metadata & Audit"]
+    end
+
+    subgraph OBS [Observability]
+        PROM["🔥 Prometheus"]
+        GRAF["📊 Grafana"]
+    end
+
+    %% Connections
+    UI -->|Upload / Query| API
+    API -->|Store raw PDF| S3
+    API -->|Write job metadata| PG
+    API -->|Enqueue job| Q
+    Q --> ENG
+    ENG -->|Persist results| S3
+    ENG -->|Update status| PG
+    API -->|Fetch results| PG
+    API -->|Fetch artifacts| S3
+    API -->|Report| UI
+
+    API -->|metrics| PROM
+    ENG -->|metrics| PROM
+    PROM --> GRAF
+    GRAF -->|Dashboard| UI
+
+    %% Styling
+    classDef ui fill:#e1f5fe,stroke:#01579b,stroke-width:2px,color:#01579b;
+    classDef api fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20;
+    classDef queue fill:#fff3e0,stroke:#ef6c00,stroke-width:2px,color:#e65100;
+    classDef engine fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#4a148c;
+    classDef data fill:#eceff1,stroke:#455a64,stroke-width:2px,color:#263238;
+    classDef obs fill:#fffde7,stroke:#fbc02d,stroke-width:2px,color:#f57f17;
+
+    class UI ui;
+    class API api;
+    class Q queue;
+    class ENG engine;
+    class S3,PG data;
+    class PROM,GRAF obs;
+```
 
 ---
 
