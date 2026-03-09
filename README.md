@@ -46,8 +46,6 @@ PDFs → **safe redaction** → **LLM-based structured extraction (redacted only
 
 ## Project Roadmap
 
-> Development is driven by [Claude Code](https://claude.ai/claude-code).
-
 ### Phase 0 — MVP (target: end of current week)
 Complete the core pipeline end-to-end on local Docker Compose. All checklist items above must be green before moving on.
 
