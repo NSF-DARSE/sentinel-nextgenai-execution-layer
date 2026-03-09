@@ -1,26 +1,66 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+import io
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 from uuid import UUID
 
 from app.db import get_db
 from app.models import Document, Job, JobStatus
 from app.schemas import DocumentCreate, DocumentCreateResponse, JobStatusResponse
+from app.storage import MINIO_BUCKET, ensure_bucket, get_minio_client
 
 router = APIRouter()
+
 
 @router.post("/documents", response_model=DocumentCreateResponse)
 def create_document(payload: DocumentCreate, db: Session = Depends(get_db)):
     doc = Document(filename=payload.filename, content_type=payload.content_type)
     db.add(doc)
-    db.flush()  # gives us doc.id before commit
+    db.flush()
 
     job = Job(document_id=doc.id, status=JobStatus.QUEUED)
     db.add(job)
     db.commit()
 
     return DocumentCreateResponse(document_id=doc.id, job_id=job.id, status=job.status.value)
+
+
+@router.post("/documents/upload", response_model=DocumentCreateResponse)
+def upload_document(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    content_type = file.content_type or "application/pdf"
+
+    doc = Document(filename=file.filename, content_type=content_type)
+    db.add(doc)
+    db.flush()
+
+    job = Job(document_id=doc.id, status=JobStatus.QUEUED)
+    db.add(job)
+    db.commit()
+
+    # Store raw PDF in MinIO: raw/{doc_id}/{filename}
+    pdf_bytes = file.file.read()
+    minio = get_minio_client()
+    ensure_bucket(minio)
+    raw_key = f"raw/{doc.id}/{file.filename}"
+    minio.put_object(
+        MINIO_BUCKET,
+        raw_key,
+        io.BytesIO(pdf_bytes),
+        length=len(pdf_bytes),
+        content_type=content_type,
+    )
+
+    # Enqueue parse task
+    from app.worker import parse_document
+    parse_document.delay(str(job.id), str(doc.id), file.filename)
+
+    return DocumentCreateResponse(document_id=doc.id, job_id=job.id, status=job.status.value)
+
 
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
 def get_job(job_id: UUID, db: Session = Depends(get_db)):
