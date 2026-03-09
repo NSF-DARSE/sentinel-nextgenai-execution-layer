@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import io
-
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 from uuid import UUID
@@ -32,6 +30,8 @@ def upload_document(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
+    from app.worker import parse_document
+
     content_type = file.content_type or "application/pdf"
 
     doc = Document(filename=file.filename, content_type=content_type)
@@ -40,24 +40,32 @@ def upload_document(
 
     job = Job(document_id=doc.id, status=JobStatus.QUEUED)
     db.add(job)
-    db.commit()
+    db.flush()  # get IDs without committing yet
 
-    # Store raw PDF in MinIO: raw/{doc_id}/{filename}
-    pdf_bytes = file.file.read()
+    # Stream upload to MinIO without loading the entire file into memory.
+    # seek to end to measure size, then rewind for the actual upload.
+    raw_key = f"raw/{doc.id}/{file.filename}"
     minio = get_minio_client()
     ensure_bucket(minio)
-    raw_key = f"raw/{doc.id}/{file.filename}"
+    file.file.seek(0, 2)
+    file_size = file.file.tell()
+    file.file.seek(0)
     minio.put_object(
         MINIO_BUCKET,
         raw_key,
-        io.BytesIO(pdf_bytes),
-        length=len(pdf_bytes),
+        file.file,
+        length=file_size,
         content_type=content_type,
     )
 
-    # Enqueue parse task
-    from app.worker import parse_document
-    parse_document.delay(str(job.id), str(doc.id), file.filename)
+    # Enqueue parse task before committing so we can roll back DB if dispatch fails.
+    try:
+        parse_document.delay(str(job.id), str(doc.id), file.filename)
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=503, detail=f"Failed to enqueue parse task: {exc}")
+
+    db.commit()
 
     return DocumentCreateResponse(document_id=doc.id, job_id=job.id, status=job.status.value)
 
