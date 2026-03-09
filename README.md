@@ -42,15 +42,54 @@ PDFs → **safe redaction** → **LLM-based structured extraction (redacted only
 - Multi-tenant governance + enterprise RBAC
 - Policy engine (e.g., OPA), tokenization vault, stronger prompt-injection defenses
 
+---
+
+## Project Roadmap
+
+> Development is driven by [Claude Code](https://claude.ai/claude-code).
+
+### Phase 0 — MVP (target: end of current week)
+Complete the core pipeline end-to-end on local Docker Compose. All checklist items above must be green before moving on.
+
+Pipeline: `upload → parse → redact → LLM extract → validate → store → observe`
+
+### Phase 1 — Presentable (target: following week)
+Make the system demo-ready and visually inspectable.
+
+- **UI dashboard** — document upload, live job status polling, extracted structured output viewer, redaction diff (what got blacked out and why)
+- **Grafana dashboards** — pre-configured panels for throughput, latency, redaction counts, failure rates, review queue depth
+- **Prompt + model versioning** — every LLM extraction job records model name, prompt version, and schema version in the audit trail
+- **Sample data** — anonymized demo bank statement PDFs for a self-contained demo flow
+
+### Phase 2 — Cloud Deployment (GCP)
+Migrate the dockerized local stack to GCP with minimal code changes.
+
+| Local | GCP | Notes |
+|---|---|---|
+| MinIO | Cloud Storage (GCS) | S3-compatible endpoint, swap env var only |
+| PostgreSQL (Docker) | Cloud SQL (PostgreSQL) | Swap `DATABASE_URL` |
+| Redis (Docker) | Cloud Memorystore | Swap Redis URL |
+| FastAPI + Worker | Cloud Run | Push image to Artifact Registry, deploy |
+
+### Phase 3 — Databricks Integration
+Introduce Databricks for the audit trail, analytics, and model governance layers.
+
+- **Delta Lake** — replace (or mirror) PostgreSQL audit events with append-only Delta tables; immutable by design, regulators love it
+- **MLflow** (built into Databricks) — prompt versioning, model tracking, extraction confidence metrics over time
+- **Databricks SQL** — analytics dashboard across all jobs: accuracy trends, redaction patterns, model drift
+- **Unity Catalog** — data governance and lineage for the extracted structured outputs
+
+> Databricks runs natively on GCP, so Phase 2 and Phase 3 coexist in the same cloud.
+
 **Project status**
-- [x] Repo initialized  
-- [x] API: upload PDF  
-- [x] Storage: raw PDF + metadata  
-- [ ] Parse: extract text  
-- [ ] PII detection + redaction  
-- [ ] LLM extraction (redacted text only)  
-- [ ] Validation + review state  
-- [ ] Audit trail  
+- [x] Repo initialized
+- [x] API: upload PDF
+- [x] Storage: raw PDF + metadata
+- [ ] Parse: extract text
+- [ ] PII detection + redaction
+- [ ] LLM extraction (redacted text only)
+- [ ] Validation + review state
+- [ ] Audit trail
 - [ ] Dashboard (Prometheus + Grafana)
 
 ---
