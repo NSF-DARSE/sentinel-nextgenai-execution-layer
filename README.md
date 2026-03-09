@@ -44,8 +44,8 @@ PDFs → **safe redaction** → **LLM-based structured extraction (redacted only
 
 **Project status**
 - [x] Repo initialized  
-- [ ] API: upload PDF  
-- [ ] Storage: raw PDF + metadata  
+- [x] API: upload PDF  
+- [x] Storage: raw PDF + metadata  
 - [ ] Parse: extract text  
 - [ ] PII detection + redaction  
 - [ ] LLM extraction (redacted text only)  
