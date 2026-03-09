@@ -58,6 +58,7 @@ Make the system demo-ready and visually inspectable.
 - **Grafana dashboards** — pre-configured panels for throughput, latency, redaction counts, failure rates, review queue depth
 - **Prompt + model versioning** — every LLM extraction job records model name, prompt version, and schema version in the audit trail
 - **Sample data** — anonymized demo bank statement PDFs for a self-contained demo flow
+- **Document relevance check** — after parsing, classify whether the document is financially relevant (bank statement, paystub) before passing it to redaction; irrelevant documents (flight tickets, receipts, etc.) are rejected early with a reason; batch uploads surface per-file accept/reject results to the user
 
 ### Phase 2 — Cloud Deployment (GCP)
 Migrate the dockerized local stack to GCP with minimal code changes.
@@ -83,8 +84,8 @@ Introduce Databricks for the audit trail, analytics, and model governance layers
 - [x] Repo initialized
 - [x] API: upload PDF
 - [x] Storage: raw PDF + metadata
-- [ ] Parse: extract text
-- [ ] PII detection + redaction
+- [x] Parse: extract text
+- [x] PII detection + redaction
 - [ ] LLM extraction (redacted text only)
 - [ ] Validation + review state
 - [ ] Audit trail

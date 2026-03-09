@@ -1,0 +1,158 @@
+[
+  {
+    "entity_type": "LOCATION",
+    "start": 47,
+    "end": 66,
+    "original_value": "100 Commerce Street"
+  },
+  {
+    "entity_type": "LOCATION",
+    "start": 51,
+    "end": 66,
+    "original_value": "Commerce Street"
+  },
+  {
+    "entity_type": "LOCATION",
+    "start": 68,
+    "end": 78,
+    "original_value": "Wilmington"
+  },
+  {
+    "entity_type": "PHONE_NUMBER",
+    "start": 91,
+    "end": 105,
+    "original_value": "1-800-555-0192"
+  },
+  {
+    "entity_type": "PERSON",
+    "start": 138,
+    "end": 156,
+    "original_value": "James R. Whitfield"
+  },
+  {
+    "entity_type": "LOCATION",
+    "start": 188,
+    "end": 214,
+    "original_value": "4821 Elmwood Drive, Apt 3B"
+  },
+  {
+    "entity_type": "LOCATION",
+    "start": 230,
+    "end": 236,
+    "original_value": "Austin"
+  },
+  {
+    "entity_type": "ACCOUNT_NUMBER",
+    "start": 247,
+    "end": 266,
+    "original_value": "**** **** **** 4408"
+  },
+  {
+    "entity_type": "SSN_LAST4",
+    "start": 267,
+    "end": 285,
+    "original_value": "SSN (last 4): 7291"
+  },
+  {
+    "entity_type": "ROUTING_NUMBER",
+    "start": 302,
+    "end": 311,
+    "original_value": "021000089"
+  },
+  {
+    "entity_type": "US_SSN",
+    "start": 302,
+    "end": 311,
+    "original_value": "021000089"
+  },
+  {
+    "entity_type": "US_BANK_NUMBER",
+    "start": 302,
+    "end": 311,
+    "original_value": "021000089"
+  },
+  {
+    "entity_type": "LOCATION",
+    "start": 769,
+    "end": 780,
+    "original_value": "NETFLIX.COM"
+  },
+  {
+    "entity_type": "US_BANK_NUMBER",
+    "start": 816,
+    "end": 824,
+    "original_value": "00204511"
+  },
+  {
+    "entity_type": "LOCATION",
+    "start": 1248,
+    "end": 1267,
+    "original_value": "100 Commerce Street"
+  },
+  {
+    "entity_type": "LOCATION",
+    "start": 1252,
+    "end": 1267,
+    "original_value": "Commerce Street"
+  },
+  {
+    "entity_type": "LOCATION",
+    "start": 1269,
+    "end": 1279,
+    "original_value": "Wilmington"
+  },
+  {
+    "entity_type": "PHONE_NUMBER",
+    "start": 1292,
+    "end": 1306,
+    "original_value": "1-800-555-0192"
+  },
+  {
+    "entity_type": "ACCOUNT_NUMBER",
+    "start": 1392,
+    "end": 1411,
+    "original_value": "**** **** **** 4408"
+  },
+  {
+    "entity_type": "US_BANK_NUMBER",
+    "start": 1617,
+    "end": 1625,
+    "original_value": "12345678"
+  },
+  {
+    "entity_type": "PERSON",
+    "start": 1798,
+    "end": 1807,
+    "original_value": "T. Nguyen"
+  },
+  {
+    "entity_type": "PHONE_NUMBER",
+    "start": 2344,
+    "end": 2358,
+    "original_value": "1-800-555-0192"
+  },
+  {
+    "entity_type": "LOCATION",
+    "start": 2558,
+    "end": 2577,
+    "original_value": "100 Commerce Street"
+  },
+  {
+    "entity_type": "LOCATION",
+    "start": 2562,
+    "end": 2577,
+    "original_value": "Commerce Street"
+  },
+  {
+    "entity_type": "LOCATION",
+    "start": 2579,
+    "end": 2589,
+    "original_value": "Wilmington"
+  },
+  {
+    "entity_type": "PHONE_NUMBER",
+    "start": 2602,
+    "end": 2616,
+    "original_value": "1-800-555-0192"
+  }
+]
