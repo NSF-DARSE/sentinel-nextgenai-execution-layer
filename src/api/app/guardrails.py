@@ -43,6 +43,7 @@ def validate_upload(file: UploadFile) -> None:
 
     # 3. Text extraction check: page 1 must contain extractable text
     try:
+        file.file.seek(0)
         with pdfplumber.open(file.file) as pdf:
             first_page = pdf.pages[0] if pdf.pages else None
             text = first_page.extract_text() if first_page else None
