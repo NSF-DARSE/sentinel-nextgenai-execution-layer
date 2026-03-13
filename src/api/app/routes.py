@@ -13,6 +13,7 @@ from app.schemas import (
     DocumentUploadResponse,
 )
 from app.storage import MINIO_BUCKET, ensure_bucket, get_minio_client
+from app.guardrails import validate_upload
 
 router = APIRouter()
 
@@ -35,6 +36,8 @@ def upload_document(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
+    validate_upload(file)
+
     from app.worker import parse_document
 
     content_type = file.content_type or "application/pdf"
