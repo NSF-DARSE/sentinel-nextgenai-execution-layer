@@ -80,6 +80,29 @@ Introduce Databricks for the audit trail, analytics, and model governance layers
 
 > Databricks runs natively on GCP, so Phase 2 and Phase 3 coexist in the same cloud.
 
+## LLM Extraction & Agentic Phase
+
+The next phase of the pipeline introduces LLM-based extraction — but the core guarantee does not change. The LLM only ever receives redacted text. Redaction always runs first. This is enforced by the pipeline, not by trust.
+
+**Step 1 — Single LLM extraction (foundation)**
+
+The first implementation is a single extraction step. After redaction completes, the Celery worker picks up the redacted text, sends it to an LLM with a structured prompt, and returns a risk profile: income, account balances, recurring transactions, overdraft flags. This output is schema-defined and versioned. The model name and prompt version are recorded in the audit trail alongside the redacted artifact that was used as input.
+
+**Step 2 — Multi-agent architecture with Google ADK**
+
+The single-step extraction evolves into a two-agent pipeline orchestrated via Google Agent Development Kit (ADK):
+
+- **Document Evaluation Agent** — runs first. Performs a relevance check on the parsed and redacted text to determine whether the document is actually a financial document (bank statement, paystub). This catches documents that cleared the Level 1 input guardrails — valid PDFs with financial keywords — but aren't genuinely relevant at a semantic level, like a restaurant bill or a lease agreement. Documents that fail relevance are rejected here with a reason, before any extraction attempt.
+- **Credit Analysis Agent** — runs only if the Document Evaluation Agent passes the file. Takes the redacted text and performs structured extraction: income verification, balance trends, risk classification, and anomaly flags.
+
+An orchestrator coordinates both agents. Evaluation always runs first; credit analysis is gated behind it. Neither agent receives anything other than redacted text.
+
+**Why this matters at scale**
+
+This architecture is designed for batch processing — think thousands of customer loan applications processed overnight, each file moving through the same guaranteed pipeline with no human reading a single raw document. The agents operate in parallel across a worker pool, the audit trail captures every step, and the entire run is observable via the metrics layer.
+
+---
+
 **Project status**
 - [x] Repo initialized
 - [x] API: upload PDF

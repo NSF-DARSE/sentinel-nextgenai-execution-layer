@@ -201,3 +201,106 @@ def redact_document(self, job_id: str, doc_id: str) -> None:
         raise
     finally:
         db.close()
+
+
+@celery_app.task(bind=True, max_retries=2, default_retry_delay=10)
+def extract_document(self, job_id: str, doc_id: str) -> None:
+    """
+    LLM extraction step: fetch redacted/{doc_id}/redacted.txt from MinIO,
+    send to Claude via extractor.extract_from_redacted(), scan output for
+    PII leaks, then store:
+      - extracted/{doc_id}/extraction.json        – structured risk profile
+      - extracted/{doc_id}/extraction_meta.json   – model/prompt versioning + token usage
+
+    Guarantee: Claude only ever receives the redacted text artifact.
+    The raw PDF and parsed text are never touched by this task.
+    Idempotent: overwrites previous output on re-run.
+    """
+    from app.extractor import extract_from_redacted, PROMPT_VERSION, MODEL
+
+    log = logging.getLogger(__name__)
+
+    db: Session = SessionLocal()
+    try:
+        job = db.get(Job, job_id)
+        if job is None:
+            log.error("job_id=%s not found in DB", job_id)
+            return
+
+        log.info("job_id=%s doc_id=%s extract status=RUNNING", job_id, doc_id)
+        _set_job_status(db, job, JobStatus.RUNNING)
+
+        minio = get_minio_client()
+        ensure_bucket(minio)
+
+        # Fetch redacted text — the ONLY input Claude will see.
+        redacted_key = f"redacted/{doc_id}/redacted.txt"
+        log.info("job_id=%s fetching redacted artifact key=%s", job_id, redacted_key)
+
+        response = minio.get_object(MINIO_BUCKET, redacted_key)
+        try:
+            redacted_text = response.read().decode("utf-8")
+        finally:
+            response.close()
+            response.release_conn()
+
+        log.info(
+            "job_id=%s doc_id=%s redacted_chars=%d sending to Claude model=%s",
+            job_id, doc_id, len(redacted_text), MODEL,
+        )
+
+        # Call Claude — output PII scan is inside extract_from_redacted().
+        result = extract_from_redacted(redacted_text)
+
+        # Split _meta out for a separate artifact — keeps extraction.json clean.
+        meta = result.pop("_meta", {})
+        meta["prompt_version"] = PROMPT_VERSION
+        meta["model"] = MODEL
+        meta["doc_id"] = doc_id
+        meta["job_id"] = job_id
+
+        # Store structured extraction result.
+        extraction_bytes = json.dumps(result, ensure_ascii=False, indent=2).encode("utf-8")
+        extraction_key = f"extracted/{doc_id}/extraction.json"
+        minio.put_object(
+            MINIO_BUCKET,
+            extraction_key,
+            io.BytesIO(extraction_bytes),
+            length=len(extraction_bytes),
+            content_type="application/json",
+        )
+        log.info("job_id=%s stored extraction key=%s", job_id, extraction_key)
+
+        # Store metadata / versioning artifact.
+        meta_bytes = json.dumps(meta, ensure_ascii=False, indent=2).encode("utf-8")
+        meta_key = f"extracted/{doc_id}/extraction_meta.json"
+        minio.put_object(
+            MINIO_BUCKET,
+            meta_key,
+            io.BytesIO(meta_bytes),
+            length=len(meta_bytes),
+            content_type="application/json",
+        )
+        log.info(
+            "job_id=%s stored extraction meta key=%s input_tokens=%s output_tokens=%s",
+            job_id, meta_key, meta.get("input_tokens"), meta.get("output_tokens"),
+        )
+
+        _set_job_status(db, job, JobStatus.SUCCEEDED)
+        log.info("job_id=%s status=SUCCEEDED", job_id)
+
+    except Exception as exc:
+        log.exception("job_id=%s extract failed: %s", job_id, exc)
+        try:
+            job = db.get(Job, job_id)
+            if job:
+                _set_job_status(db, job, JobStatus.FAILED, error_message=str(exc)[:1024])
+        except Exception:
+            pass
+        # Retry on transient errors (API timeout, rate limit).
+        # ValueError from output PII scan is NOT retried — it's a hard failure.
+        if not isinstance(exc, ValueError):
+            raise self.retry(exc=exc)
+        raise
+    finally:
+        db.close()

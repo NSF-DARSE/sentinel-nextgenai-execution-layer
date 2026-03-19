@@ -68,14 +68,16 @@ def upload_document(
 
     db.commit()
 
-    # Enqueue parse → redact chain after committing so workers can find the records.
-    # .si() makes redact_document immutable so the None return from parse is not forwarded.
+    # Enqueue parse → redact → extract chain after committing so workers can find the records.
+    # .si() (immutable signature) ensures the None return of each step is not forwarded
+    # to the next, so each task receives only its own explicit arguments.
     try:
         from celery import chain
-        from app.worker import redact_document
+        from app.worker import redact_document, extract_document
         chain(
             parse_document.s(str(job.id), str(doc.id), file.filename),
             redact_document.si(str(job.id), str(doc.id)),
+            extract_document.si(str(job.id), str(doc.id)),
         ).apply_async()
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Failed to enqueue pipeline: {exc}")

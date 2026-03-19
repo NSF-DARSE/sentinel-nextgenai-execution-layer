@@ -2,9 +2,20 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer, RecognizerRegistry
+import spacy
+from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer, RecognizerRegistry, RecognizerResult
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
+
+# spaCy model loaded once — used as an independent second-pass detector.
+# Presidio already uses spaCy internally, but only surfaces hits it's confident
+# about.  Running spaCy directly and merging results (the "ensemble") catches
+# names that Presidio drops — especially in short transaction lines where
+# surrounding context is sparse.
+try:
+    _nlp = spacy.load("en_core_web_lg")
+except OSError:
+    _nlp = None  # Graceful degradation: ensemble disabled if model not present.
 
 # Entity types this pipeline detects and redacts.
 # DATE_TIME intentionally excluded — transaction dates are not PII.
@@ -69,8 +80,37 @@ def _build_analyzer() -> AnalyzerEngine:
             ),
             Pattern(
                 name="firstname_then_initial",
-                regex=r"\b[A-Z][a-z]{2,}\s+[A-Z]\.\b",
+                regex=r"\b[A-Z][a-z]{2,}\s+[A-Z]\.(?=\s|$|,)",
                 score=0.7,
+            ),
+        ],
+    ))
+
+    # ── Custom: Tabular customer record names ─────────────────────────────────
+    # spaCy NER misses names in table rows because a single line like
+    # "C001 James Whitfield 321-54-9876" has no surrounding prose context.
+    # These patterns use fixed-width lookbehinds for customer ID prefixes
+    # (C + exactly 3 or 4 digits + space) so they only fire in that context
+    # and never cause false positives in transaction description lines.
+    #
+    # Covers:
+    #   "C001 James Whitfield"    →  First Last
+    #   "C004 Sandra L. Patel"    →  First M. Last
+    #   "C006 Emily Nguyen"       →  First Last
+    registry.add_recognizer(PatternRecognizer(
+        supported_entity="PERSON",
+        patterns=[
+            # Customer ID with 3-digit suffix: C001, C004, C006, C010
+            Pattern(
+                name="tabular_name_after_c3",
+                regex=r"(?<=C\d\d\d )[A-Z][a-z]{2,}(?:\s+[A-Z]\.)?\s+[A-Z][a-z]{2,}",
+                score=0.85,
+            ),
+            # Customer ID with 4-digit suffix: C0001, C0010 etc.
+            Pattern(
+                name="tabular_name_after_c4",
+                regex=r"(?<=C\d\d\d\d )[A-Z][a-z]{2,}(?:\s+[A-Z]\.)?\s+[A-Z][a-z]{2,}",
+                score=0.85,
             ),
         ],
     ))
@@ -152,18 +192,74 @@ _OPERATORS: dict[str, OperatorConfig] = {
 _OPERATORS["DEFAULT"] = OperatorConfig("replace", {"new_value": "[REDACTED]"})
 
 
+def _spacy_ensemble(text: str, presidio_results: List[RecognizerResult]) -> List[RecognizerResult]:
+    """
+    Run spaCy NER directly and return any PERSON/LOCATION hits that Presidio
+    did not already cover.  Only non-overlapping spans are added so we don't
+    produce duplicate placeholders in the anonymized output.
+
+    spaCy entity labels we care about:
+        PERSON  → PERSON
+        GPE     → LOCATION  (geopolitical: cities, countries, states)
+        LOC     → LOCATION  (physical locations: mountains, rivers, etc.)
+
+    ORG is intentionally skipped — bank names and employers are not PII and
+    we don't want "ACME Corp Payroll" turned into [LOCATION].
+    """
+    if _nlp is None:
+        return presidio_results  # Model not available — return unchanged.
+
+    _LABEL_MAP = {"PERSON": "PERSON", "GPE": "LOCATION", "LOC": "LOCATION"}
+
+    doc = _nlp(text)
+    merged = list(presidio_results)
+
+    for ent in doc.ents:
+        entity_type = _LABEL_MAP.get(ent.label_)
+        if entity_type is None:
+            continue  # Not an entity type we redact.
+
+        # Skip if any existing result overlaps with this span.
+        overlaps = any(
+            r.start < ent.end_char and r.end > ent.start_char
+            for r in presidio_results
+        )
+        if overlaps:
+            continue
+
+        merged.append(RecognizerResult(
+            entity_type=entity_type,
+            start=ent.start_char,
+            end=ent.end_char,
+            score=0.65,  # Moderate confidence — spaCy NER, no extra context signals.
+        ))
+
+    return merged
+
+
 def redact_text(text: str) -> Tuple[str, List[dict]]:
     """
     Detect PII in *text*, replace each span with a typed placeholder, and
     return (redacted_text, audit_entries).
+
+    Detection uses a two-pass ensemble:
+      Pass 1 — Presidio (custom recognizers + spaCy-backed NER via Presidio)
+      Pass 2 — spaCy NER directly (catches names Presidio drops in sparse context)
+    The union of both passes is redacted.  False positives are acceptable here;
+    false negatives (missed PII reaching the LLM) are not.
 
     Each audit entry is a dict with keys:
         entity_type    – e.g. "PERSON"
         start          – character offset in the ORIGINAL text
         end            – character offset in the ORIGINAL text
         original_value – the raw text that was redacted
+        detector       – "presidio" | "spacy_ensemble"
     """
-    results = _analyzer.analyze(text=text, entities=_ENTITIES, language="en")
+    presidio_results = _analyzer.analyze(text=text, entities=_ENTITIES, language="en")
+    results = _spacy_ensemble(text, presidio_results)
+
+    # Tag each audit entry with which detector caught it.
+    presidio_spans = {(r.start, r.end) for r in presidio_results}
 
     audit: List[dict] = [
         {
@@ -171,13 +267,14 @@ def redact_text(text: str) -> Tuple[str, List[dict]]:
             "start": r.start,
             "end": r.end,
             "original_value": text[r.start: r.end],
+            "detector": "presidio" if (r.start, r.end) in presidio_spans else "spacy_ensemble",
         }
         for r in sorted(results, key=lambda r: r.start)
     ]
 
     anonymized = _anonymizer.anonymize(
         text=text,
-        analyzer_results=results,
+        analyzer_results=results,  # union of presidio + spacy_ensemble
         operators=_OPERATORS,
     )
 

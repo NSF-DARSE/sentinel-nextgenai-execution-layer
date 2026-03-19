@@ -152,6 +152,37 @@ check("Transaction date 03/15/2025 NOT redacted",
       f"got: {redacted.strip()}")
 
 # ─────────────────────────────────────────────────────────────────────────────
+section("TABULAR NAMES — customer record rows (ID prefix context)")
+
+# C001 James Whitfield — 3-digit suffix, plain First Last
+text = "C001 James Whitfield 321-54-9876"
+redacted, audit = redact_text(text)
+check("Tabular name 'James Whitfield' after C001 redacted",
+      "James Whitfield" not in redacted,
+      f"got: {redacted.strip()}")
+
+# C004 Sandra L. Patel — 3-digit suffix, First M. Last
+text = "C004 Sandra L. Patel 456-78-9012"
+redacted, audit = redact_text(text)
+check("Tabular name 'Sandra L. Patel' after C004 redacted",
+      "Sandra" not in redacted or "Patel" not in redacted,
+      f"got: {redacted.strip()}")
+
+# C006 Emily Nguyen — 3-digit suffix, two-syllable last name
+text = "C006 Emily Nguyen 789-01-2345"
+redacted, audit = redact_text(text)
+check("Tabular name 'Emily Nguyen' after C006 redacted",
+      "Emily Nguyen" not in redacted,
+      f"got: {redacted.strip()}")
+
+# C010 Priya Sharma — 3-digit suffix, South-Asian name
+text = "C010 Priya Sharma 567-89-0123"
+redacted, audit = redact_text(text)
+check("Tabular name 'Priya Sharma' after C010 redacted",
+      "Priya Sharma" not in redacted,
+      f"got: {redacted.strip()}")
+
+# ─────────────────────────────────────────────────────────────────────────────
 section("Audit trail output")
 
 text = "James R. Whitfield, routing: 021000089, account: **** **** **** 4408"
