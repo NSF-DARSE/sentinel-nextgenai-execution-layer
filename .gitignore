@@ -2,6 +2,25 @@
 docs/build/
 docs/_build/
 
+# Sensitive data — never commit
+tests/fixtures/*.pdf
+tests/fixtures/*.csv
+tests/fixtures/*.xlsx
+*.env
+.env*
+!.env.example
+
+# Pipeline output artifacts (local runs)
+extracted.txt
+redacted.txt
+redaction_report.json
+extraction.json
+redacted_ssn.txt
+
+# Mac metadata
+.DS_Store
+**/.DS_Store
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -209,3 +228,4 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+.DS_Store

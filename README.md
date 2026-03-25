@@ -42,15 +42,86 @@ PDFs → **safe redaction** → **LLM-based structured extraction (redacted only
 - Multi-tenant governance + enterprise RBAC
 - Policy engine (e.g., OPA), tokenization vault, stronger prompt-injection defenses
 
+---
+
+## Project Roadmap
+
+### Phase 0 — MVP (target: end of current week)
+Complete the core pipeline end-to-end on local Docker Compose. All checklist items above must be green before moving on.
+
+Pipeline: `upload → parse → redact → LLM extract → validate → store → observe`
+
+### Phase 1 — Presentable (target: following week)
+Make the system demo-ready and visually inspectable.
+
+- **UI dashboard** — document upload, live job status polling, extracted structured output viewer, redaction diff (what got blacked out and why)
+- **Grafana dashboards** — pre-configured panels for throughput, latency, redaction counts, failure rates, review queue depth
+- **Prompt + model versioning** — every LLM extraction job records model name, prompt version, and schema version in the audit trail
+- **Sample data** — anonymized demo bank statement PDFs for a self-contained demo flow
+- **Document relevance check** — after parsing, classify whether the document is financially relevant (bank statement, paystub) before passing it to redaction; irrelevant documents (flight tickets, receipts, etc.) are rejected early with a reason; batch uploads surface per-file accept/reject results to the user
+
+### Phase 2 — Cloud Deployment (GCP)
+Migrate the dockerized local stack to GCP with minimal code changes.
+
+| Local | GCP | Notes |
+|---|---|---|
+| MinIO | Cloud Storage (GCS) | S3-compatible endpoint, swap env var only |
+| PostgreSQL (Docker) | Cloud SQL (PostgreSQL) | Swap `DATABASE_URL` |
+| Redis (Docker) | Cloud Memorystore | Swap Redis URL |
+| FastAPI + Worker | Cloud Run | Push image to Artifact Registry, deploy |
+
+### Phase 3 — Databricks Integration
+Introduce Databricks for the audit trail, analytics, and model governance layers.
+
+- **Delta Lake** — replace (or mirror) PostgreSQL audit events with append-only Delta tables; immutable by design, regulators love it
+- **MLflow** (built into Databricks) — prompt versioning, model tracking, extraction confidence metrics over time
+- **Databricks SQL** — analytics dashboard across all jobs: accuracy trends, redaction patterns, model drift
+- **Unity Catalog** — data governance and lineage for the extracted structured outputs
+
+> Databricks runs natively on GCP, so Phase 2 and Phase 3 coexist in the same cloud.
+
+## LLM Extraction & Agentic Phase
+
+The next phase of the pipeline introduces LLM-based extraction — but the core guarantee does not change. The LLM only ever receives redacted text. Redaction always runs first. This is enforced by the pipeline, not by trust.
+
+**Step 1 — Single LLM extraction (foundation)**
+
+The first implementation is a single extraction step. After redaction completes, the Celery worker picks up the redacted text, sends it to an LLM with a structured prompt, and returns a risk profile: income, account balances, recurring transactions, overdraft flags. This output is schema-defined and versioned. The model name and prompt version are recorded in the audit trail alongside the redacted artifact that was used as input.
+
+**Step 2 — Multi-agent architecture with Google ADK**
+
+The single-step extraction evolves into a two-agent pipeline orchestrated via Google Agent Development Kit (ADK):
+
+- **Document Evaluation Agent** — runs first. Performs a relevance check on the parsed and redacted text to determine whether the document is actually a financial document (bank statement, paystub). This catches documents that cleared the Level 1 input guardrails — valid PDFs with financial keywords — but aren't genuinely relevant at a semantic level, like a restaurant bill or a lease agreement. Documents that fail relevance are rejected here with a reason, before any extraction attempt.
+- **Credit Analysis Agent** — runs only if the Document Evaluation Agent passes the file. Takes the redacted text and performs structured extraction: income verification, balance trends, risk classification, and anomaly flags.
+
+An orchestrator coordinates both agents. Evaluation always runs first; credit analysis is gated behind it. Neither agent receives anything other than redacted text.
+
+**Why this matters at scale**
+
+This architecture is designed for batch processing — think thousands of customer loan applications processed overnight, each file moving through the same guaranteed pipeline with no human reading a single raw document. The agents operate in parallel across a worker pool, the audit trail captures every step, and the entire run is observable via the metrics layer.
+
+---
+## Checklist
+- [ ] Providing deatils on failure jobs
+- [ ] Setup an Output directory
+- [ ] SAve the Metadata into Postgres Database
+- [ ] Test out different usecases
+- [ ] Possibly engineer some data for downstream folks
+- [ ] Setup Google API account
+- [ ] Setup a Confidence Score
+
+---
+
 **Project status**
-- [x] Repo initialized  
-- [ ] API: upload PDF  
-- [ ] Storage: raw PDF + metadata  
-- [ ] Parse: extract text  
-- [ ] PII detection + redaction  
-- [ ] LLM extraction (redacted text only)  
-- [ ] Validation + review state  
-- [ ] Audit trail  
+- [x] Repo initialized
+- [x] API: upload PDF
+- [x] Storage: raw PDF + metadata
+- [x] Parse: extract text
+- [x] PII detection + redaction
+- [ ] LLM extraction (redacted text only)
+- [ ] Validation + review state
+- [ ] Audit trail
 - [ ] Dashboard (Prometheus + Grafana)
 
 ---

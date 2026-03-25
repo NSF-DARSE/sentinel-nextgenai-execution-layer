@@ -15,6 +15,18 @@ services:
     ports:
       - "6379:6379"
 
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: sentinel
+      MINIO_ROOT_PASSWORD: sentinel123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+
   api:
     build:
       context: ./src/api
@@ -23,9 +35,33 @@ services:
     depends_on:
       - postgres
       - redis
+      - minio
     environment:
-      DATABASE_URL: postgresql+psycopg://sentinel:sentinel@postgres:5432/sentinel 
-    
+      DATABASE_URL: postgresql+psycopg://sentinel:sentinel@postgres:5432/sentinel
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: sentinel
+      MINIO_SECRET_KEY: sentinel123
+      MINIO_BUCKET: sentinel
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+
+  worker:
+    build:
+      context: ./src/api
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=2
+    depends_on:
+      - postgres
+      - redis
+      - minio
+    environment:
+      DATABASE_URL: postgresql+psycopg://sentinel:sentinel@postgres:5432/sentinel
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: sentinel
+      MINIO_SECRET_KEY: sentinel123
+      MINIO_BUCKET: sentinel
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
 
 volumes:
   pgdata:
+  miniodata:

@@ -1,26 +1,89 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 from uuid import UUID
 
 from app.db import get_db
 from app.models import Document, Job, JobStatus
-from app.schemas import DocumentCreate, DocumentCreateResponse, JobStatusResponse
+from app.schemas import (
+    DocumentCreate,
+    DocumentCreateResponse,
+    JobStatusResponse,
+    DocumentUploadResponse,
+)
+from app.storage import MINIO_BUCKET, ensure_bucket, get_minio_client
+from app.guardrails import validate_upload
 
 router = APIRouter()
+
 
 @router.post("/documents", response_model=DocumentCreateResponse)
 def create_document(payload: DocumentCreate, db: Session = Depends(get_db)):
     doc = Document(filename=payload.filename, content_type=payload.content_type)
     db.add(doc)
-    db.flush()  # gives us doc.id before commit
+    db.flush()
 
     job = Job(document_id=doc.id, status=JobStatus.QUEUED)
     db.add(job)
     db.commit()
 
     return DocumentCreateResponse(document_id=doc.id, job_id=job.id, status=job.status.value)
+
+
+@router.post("/documents/upload", response_model=DocumentCreateResponse)
+def upload_document(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    validate_upload(file)
+
+    from app.worker import parse_document
+
+    content_type = file.content_type or "application/pdf"
+
+    doc = Document(filename=file.filename, content_type=content_type)
+    db.add(doc)
+    db.flush()
+
+    job = Job(document_id=doc.id, status=JobStatus.QUEUED)
+    db.add(job)
+    db.flush()  # get IDs without committing yet
+
+    # Upload to MinIO before committing.
+    # Seek to end to measure size, then rewind for the actual upload.
+    raw_key = f"raw/{doc.id}/{file.filename}"
+    minio = get_minio_client()
+    ensure_bucket(minio)
+    file.file.seek(0, 2)
+    file_size = file.file.tell()
+    file.file.seek(0)
+    minio.put_object(
+        MINIO_BUCKET,
+        raw_key,
+        file.file,
+        length=file_size,
+        content_type=content_type,
+    )
+
+    db.commit()
+
+    # Enqueue parse → redact → extract chain after committing so workers can find the records.
+    # .si() (immutable signature) ensures the None return of each step is not forwarded
+    # to the next, so each task receives only its own explicit arguments.
+    try:
+        from celery import chain
+        from app.worker import redact_document, extract_document
+        chain(
+            parse_document.s(str(job.id), str(doc.id), file.filename),
+            redact_document.si(str(job.id), str(doc.id)),
+            extract_document.si(str(job.id), str(doc.id)),
+        ).apply_async()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Failed to enqueue pipeline: {exc}")
+
+    return DocumentCreateResponse(document_id=doc.id, job_id=job.id, status=job.status.value)
+
 
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
 def get_job(job_id: UUID, db: Session = Depends(get_db)):

@@ -23,3 +23,9 @@ class JobStatusResponse(BaseModel):
     error_message: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+class DocumentUploadResponse(BaseModel):
+    document_id: UUID
+    job_id: UUID
+    status: str
+    s3_key: str
