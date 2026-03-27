@@ -43,7 +43,7 @@ def parse_document(self, job_id: str, doc_id: str, filename: str) -> None:
     store extracted text back to MinIO as parsed/{doc_id}/extracted.txt.
     Idempotent: safe to re-run, will overwrite previous output.
     """
-    from app.metrics import record_step, record_job_outcome
+    from app.metrics import record_step, record_step_failure, record_job_outcome
 
     log = logging.getLogger(__name__)
     start = time.time()
@@ -102,6 +102,7 @@ def parse_document(self, job_id: str, doc_id: str, filename: str) -> None:
     except Exception as exc:
         log.exception("job_id=%s parse failed: %s", job_id, exc)
         record_step("parse", time.time() - start)
+        record_step_failure("parse")
         record_job_outcome("failed")
         try:
             job = db.get(Job, job_id)
@@ -126,7 +127,7 @@ def authenticate_document(self, job_id: str, doc_id: str, filename: str) -> None
     Idempotent: overwrites previous output on re-run.
     """
     from app.authenticator import authenticate_document as run_checks
-    from app.metrics import record_step, record_job_outcome
+    from app.metrics import record_step, record_step_failure, record_job_outcome
 
     log = logging.getLogger(__name__)
     start = time.time()
@@ -181,6 +182,14 @@ def authenticate_document(self, job_id: str, doc_id: str, filename: str) -> None
         )
         log.info("job_id=%s stored authenticity report key=%s", job_id, report_key)
 
+        # Quality checkpoint: persist authentication results to Postgres
+        from sqlalchemy import func
+        job.document_type  = report["document_type"]
+        job.authentic      = report["authentic"]
+        job.auth_confidence = report["confidence"]
+        job.updated_at     = func.now()
+        db.commit()
+
         _set_job_status(db, job, JobStatus.SUCCEEDED)
         record_step("authenticate", time.time() - start)
         record_job_outcome("succeeded")
@@ -189,6 +198,7 @@ def authenticate_document(self, job_id: str, doc_id: str, filename: str) -> None
     except Exception as exc:
         log.exception("job_id=%s authenticate failed: %s", job_id, exc)
         record_step("authenticate", time.time() - start)
+        record_step_failure("authenticate")
         record_job_outcome("failed")
         try:
             job = db.get(Job, job_id)
@@ -214,7 +224,7 @@ def redact_document(self, job_id: str, doc_id: str) -> None:
     """
     from collections import Counter
     from app.redactor import redact_text
-    from app.metrics import record_step, record_entities, record_job_outcome
+    from app.metrics import record_step, record_step_failure, record_entities, record_job_outcome
 
     log = logging.getLogger(__name__)
     start = time.time()
@@ -246,6 +256,13 @@ def redact_document(self, job_id: str, doc_id: str) -> None:
         counts_str = " ".join(f"{k}={v}" for k, v in sorted(counts.items()))
         log.info("job_id=%s found %s", job_id, counts_str or "no PII")
 
+        # Quality checkpoint: persist redaction results to Postgres
+        from sqlalchemy import func as sqlfunc
+        job.entity_count    = len(audit)
+        job.pii_types_found = ",".join(sorted(counts.keys())) or None
+        job.updated_at      = sqlfunc.now()
+        db.commit()
+
         redacted_bytes = redacted_text.encode("utf-8")
         redacted_key = f"redacted/{doc_id}/redacted.txt"
         minio.put_object(
@@ -270,6 +287,7 @@ def redact_document(self, job_id: str, doc_id: str) -> None:
     except Exception as exc:
         log.exception("job_id=%s redact failed: %s", job_id, exc)
         record_step("redact", time.time() - start)
+        record_step_failure("redact")
         record_job_outcome("failed")
         try:
             job = db.get(Job, job_id)
@@ -296,7 +314,7 @@ def extract_document(self, job_id: str, doc_id: str) -> None:
     Idempotent: overwrites previous output on re-run.
     """
     from app.extractor import extract_from_redacted, PROMPT_VERSION, MODEL
-    from app.metrics import record_step, record_job_outcome, record_pii_leak_block
+    from app.metrics import record_step, record_step_failure, record_job_outcome, record_pii_leak_block
 
     log = logging.getLogger(__name__)
     start = time.time()
@@ -353,14 +371,32 @@ def extract_document(self, job_id: str, doc_id: str) -> None:
             job_id, meta_key, meta.get("input_tokens"), meta.get("output_tokens"),
         )
 
-        _set_job_status(db, job, JobStatus.SUCCEEDED)
+        # Quality checkpoint: persist confidence score to Postgres
+        confidence = result.get("confidence_score")
+        from sqlalchemy import func as sqlfunc2
+        job.confidence_score = confidence
+        job.updated_at       = sqlfunc2.now()
+        db.commit()
+
+        # Route to NEEDS_REVIEW if confidence < 0.80 or document not authentic
+        if confidence is not None and confidence < 0.80:
+            log.warning("job_id=%s confidence=%.2f below threshold → NEEDS_REVIEW", job_id, confidence)
+            _set_job_status(db, job, JobStatus.NEEDS_REVIEW)
+            record_job_outcome("needs_review")
+        elif job.authentic is False:
+            log.warning("job_id=%s authentic=False → NEEDS_REVIEW", job_id)
+            _set_job_status(db, job, JobStatus.NEEDS_REVIEW)
+            record_job_outcome("needs_review")
+        else:
+            _set_job_status(db, job, JobStatus.SUCCEEDED)
+            record_job_outcome("succeeded")
         record_step("extract", time.time() - start)
-        record_job_outcome("succeeded")
-        log.info("job_id=%s status=SUCCEEDED", job_id)
+        log.info("job_id=%s status=%s confidence=%s", job_id, job.status, confidence)
 
     except Exception as exc:
         log.exception("job_id=%s extract failed: %s", job_id, exc)
         record_step("extract", time.time() - start)
+        record_step_failure("extract")
         record_job_outcome("failed")
         if isinstance(exc, ValueError) and "PII scan" in str(exc):
             record_pii_leak_block()

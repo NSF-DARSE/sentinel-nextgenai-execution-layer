@@ -23,6 +23,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 # Redis key prefixes written by workers
 _STEP_SUM_KEY   = "sentinel:step:{}:duration_sum"
 _STEP_COUNT_KEY = "sentinel:step:{}:duration_count"
+_STEP_FAIL_KEY  = "sentinel:step:{}:failures"
 _ENTITY_KEY     = "sentinel:entities:{}"
 _JOBS_KEY       = "sentinel:jobs:{}"        # succeeded / failed
 _PII_BLOCK_KEY  = "sentinel:pii_leak_blocks"
@@ -121,6 +122,18 @@ class SentinelWorkerCollector(Collector):
                     g.add_metric([], float(val))
                     yield g
 
+            # ── Step failure counts ──────────────────────────────────────
+            fail_metric = GaugeMetricFamily(
+                "sentinel_step_failures_total",
+                "Total failures per pipeline step",
+                labels=["step"],
+            )
+            for step in PIPELINE_STEPS:
+                val = r.get(_STEP_FAIL_KEY.format(step))
+                if val:
+                    fail_metric.add_metric([step], float(val))
+            yield fail_metric
+
             # ── PII leak blocks ──────────────────────────────────────────
             pii_val = r.get(_PII_BLOCK_KEY)
             g = GaugeMetricFamily(
@@ -166,6 +179,16 @@ def record_job_outcome(status: str) -> None:
         r.incr(_JOBS_KEY.format(status))
     except Exception:
         log.warning("Failed to record job outcome metric: %s", status)
+
+
+def record_step_failure(step: str) -> None:
+    """Called by Celery workers when a pipeline step fails."""
+    try:
+        import redis
+        r = redis.from_url(REDIS_URL, decode_responses=True)
+        r.incr(_STEP_FAIL_KEY.format(step))
+    except Exception:
+        log.warning("Failed to record step failure metric: %s", step)
 
 
 def record_pii_leak_block() -> None:

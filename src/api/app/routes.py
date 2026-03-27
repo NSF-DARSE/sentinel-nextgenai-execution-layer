@@ -11,6 +11,9 @@ from app.schemas import (
     DocumentCreateResponse,
     JobStatusResponse,
     DocumentUploadResponse,
+    ReviewQueueItem,
+    ReviewDecision,
+    ReviewResponse,
 )
 from app.storage import MINIO_BUCKET, ensure_bucket, get_minio_client
 from app.guardrails import validate_upload
@@ -84,6 +87,60 @@ def upload_document(
         raise HTTPException(status_code=503, detail=f"Failed to enqueue pipeline: {exc}")
 
     return DocumentCreateResponse(document_id=doc.id, job_id=job.id, status=job.status.value)
+
+
+@router.get("/jobs/review", response_model=list[ReviewQueueItem])
+def list_review_queue(db: Session = Depends(get_db)):
+    """Return all jobs currently sitting in NEEDS_REVIEW, with their metadata."""
+    jobs = (
+        db.query(Job, Document.filename)
+        .join(Document, Job.document_id == Document.id)
+        .filter(Job.status == JobStatus.NEEDS_REVIEW)
+        .order_by(Job.created_at.asc())
+        .all()
+    )
+    return [
+        ReviewQueueItem(
+            job_id=job.id,
+            document_id=job.document_id,
+            filename=filename,
+            confidence_score=job.confidence_score,
+            authentic=job.authentic,
+            auth_confidence=job.auth_confidence,
+            entity_count=job.entity_count,
+            pii_types_found=job.pii_types_found,
+            error_message=job.error_message,
+            created_at=job.created_at,
+        )
+        for job, filename in jobs
+    ]
+
+
+@router.post("/jobs/{job_id}/review", response_model=ReviewResponse)
+def submit_review(job_id: UUID, payload: ReviewDecision, db: Session = Depends(get_db)):
+    """
+    Approve or reject a NEEDS_REVIEW job.
+    - approved → status becomes SUCCEEDED
+    - rejected → status becomes FAILED
+    """
+    if payload.decision not in ("approved", "rejected"):
+        raise HTTPException(status_code=400, detail="decision must be 'approved' or 'rejected'")
+
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status != JobStatus.NEEDS_REVIEW:
+        raise HTTPException(status_code=409, detail=f"Job is not in NEEDS_REVIEW state (current: {job.status.value})")
+
+    from sqlalchemy import func
+    job.review_status = payload.decision
+    job.status = JobStatus.SUCCEEDED if payload.decision == "approved" else JobStatus.FAILED
+    if payload.decision == "rejected" and payload.notes:
+        job.error_message = payload.notes[:1024]
+    job.updated_at = func.now()
+    db.commit()
+
+    return ReviewResponse(job_id=job.id, status=job.status.value, review_status=job.review_status)
 
 
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
