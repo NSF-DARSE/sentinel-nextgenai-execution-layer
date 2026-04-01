@@ -116,13 +116,20 @@ This architecture is designed for batch processing — think thousands of custom
 **Project status**
 - [x] Repo initialized
 - [x] API: upload PDF
-- [x] Storage: raw PDF + metadata
-- [x] Parse: extract text
-- [x] PII detection + redaction
-- [ ] LLM extraction (redacted text only)
-- [ ] Validation + review state
-- [ ] Audit trail
-- [ ] Dashboard (Prometheus + Grafana)
+- [x] Storage: raw PDF + metadata (MinIO + PostgreSQL)
+- [x] Parse: extract text (pdfplumber)
+- [x] Input guardrails (file type, size, magic bytes, document classification, PII dump detection)
+- [x] PII detection + redaction (Presidio + spaCy `en_core_web_lg` ensemble)
+- [x] Document authentication (deterministic fraud detection — type classification, balance math, PDF metadata)
+- [x] LLM extraction (redacted text only — Gemini 2.5 Flash, schema-constrained, output PII scan)
+- [x] Audit trail (redaction report, authenticity report, extraction metadata per job)
+- [x] Dashboard (Prometheus + Grafana — 15-panel pipeline monitor)
+- [x] Metadata persistence (confidence score, auth result, entity counts → PostgreSQL per job)
+- [x] Validation + review state (confidence threshold → NEEDS_REVIEW routing; `review_status` field for human approval)
+- [x] Review queue API (list NEEDS_REVIEW jobs, approve/reject endpoint)
+- [x] Failure-by-step metrics (Grafana panel — which pipeline stage is breaking)
+- [ ] UI (document upload, live job status, extraction viewer, redaction diff)
+  - [ ] Surface auth flags in review queue (reviewer sees *why* document was flagged, not just `authentic: false`)
 
 ---
 

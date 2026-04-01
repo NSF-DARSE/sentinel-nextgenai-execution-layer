@@ -178,7 +178,7 @@ def extract_from_redacted(redacted_text: str) -> dict[str, Any]:
             response_mime_type="application/json",
             response_schema=_SCHEMA,
             temperature=0,
-            max_output_tokens=2048,
+            max_output_tokens=8192,
         ),
     )
 
@@ -188,6 +188,11 @@ def extract_from_redacted(redacted_text: str) -> dict[str, Any]:
         f"Extract the financial risk profile from the following redacted document.\n\n"
         f"{redacted_text}"
     )
+
+    # Check finish reason — MAX_TOKENS means the response was cut off mid-JSON
+    candidate = response.candidates[0] if response.candidates else None
+    if candidate and str(candidate.finish_reason) not in ("FinishReason.STOP", "STOP", "1"):
+        log.warning("Gemini finish_reason=%s — response may be truncated", candidate.finish_reason)
 
     raw_response = response.text
     usage = response.usage_metadata
