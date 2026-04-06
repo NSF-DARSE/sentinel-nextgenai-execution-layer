@@ -60,6 +60,17 @@ Make the system demo-ready and visually inspectable.
 - **Sample data** — anonymized demo bank statement PDFs for a self-contained demo flow
 - **Document relevance check** — after parsing, classify whether the document is financially relevant (bank statement, paystub) before passing it to redaction; irrelevant documents (flight tickets, receipts, etc.) are rejected early with a reason; batch uploads surface per-file accept/reject results to the user
 
+### LLM Backend
+
+The extraction step currently uses **Claude Sonnet 4.6** (Anthropic API) via `src/api/app/extractor.py`. The LLM backend and the deployment platform are independent — swapping one does not require changing the other.
+
+| Option | When to use | What changes |
+|---|---|---|
+| **Claude (Anthropic API)** | Development, testing, paid production | `ANTHROPIC_API_KEY` in `.env`; `extractor.py` as-is |
+| **Gemini on Vertex AI** | GCP deployment with university credits covering Vertex AI | Swap `extractor.py` to Vertex AI SDK; schema and prompt are identical |
+
+The extraction schema, system prompt, PII scan, and audit trail are backend-agnostic. If university GCP credits cover Vertex AI usage, swap to Gemini before the GCP demo with a one-file change. At demo/pilot scale (~thousands of documents), Claude API cost is negligible (~$0.01/document). At true batch scale, Vertex AI may be preferable for cost and co-location with the rest of the GCP stack.
+
 ### Phase 2 — Cloud Deployment (GCP)
 Migrate the dockerized local stack to GCP with minimal code changes.
 

@@ -43,7 +43,7 @@ services:
       MINIO_ACCESS_KEY: sentinel
       MINIO_SECRET_KEY: sentinel123
       MINIO_BUCKET: sentinel
-      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
 
   worker:
     build:
@@ -60,7 +60,7 @@ services:
       MINIO_ACCESS_KEY: sentinel
       MINIO_SECRET_KEY: sentinel123
       MINIO_BUCKET: sentinel
-      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
 
   prometheus:
     image: prom/prometheus:v2.49.0
