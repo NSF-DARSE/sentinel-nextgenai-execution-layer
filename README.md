@@ -60,6 +60,17 @@ Make the system demo-ready and visually inspectable.
 - **Sample data** — anonymized demo bank statement PDFs for a self-contained demo flow
 - **Document relevance check** — after parsing, classify whether the document is financially relevant (bank statement, paystub) before passing it to redaction; irrelevant documents (flight tickets, receipts, etc.) are rejected early with a reason; batch uploads surface per-file accept/reject results to the user
 
+### LLM Backend
+
+The extraction step currently uses **Claude Sonnet 4.6** (Anthropic API) via `src/api/app/extractor.py`. The LLM backend and the deployment platform are independent — swapping one does not require changing the other.
+
+| Option | When to use | What changes |
+|---|---|---|
+| **Claude (Anthropic API)** | Development, testing, paid production | `ANTHROPIC_API_KEY` in `.env`; `extractor.py` as-is |
+| **Gemini on Vertex AI** | GCP deployment with university credits covering Vertex AI | Swap `extractor.py` to Vertex AI SDK; schema and prompt are identical |
+
+The extraction schema, system prompt, PII scan, and audit trail are backend-agnostic. If university GCP credits cover Vertex AI usage, swap to Gemini before the GCP demo with a one-file change. At demo/pilot scale (~thousands of documents), Claude API cost is negligible (~$0.01/document). At true batch scale, Vertex AI may be preferable for cost and co-location with the rest of the GCP stack.
+
 ### Phase 2 — Cloud Deployment (GCP)
 Migrate the dockerized local stack to GCP with minimal code changes.
 
@@ -116,13 +127,20 @@ This architecture is designed for batch processing — think thousands of custom
 **Project status**
 - [x] Repo initialized
 - [x] API: upload PDF
-- [x] Storage: raw PDF + metadata
-- [x] Parse: extract text
-- [x] PII detection + redaction
-- [ ] LLM extraction (redacted text only)
-- [ ] Validation + review state
-- [ ] Audit trail
-- [ ] Dashboard (Prometheus + Grafana)
+- [x] Storage: raw PDF + metadata (MinIO + PostgreSQL)
+- [x] Parse: extract text (pdfplumber)
+- [x] Input guardrails (file type, size, magic bytes, document classification, PII dump detection)
+- [x] PII detection + redaction (Presidio + spaCy `en_core_web_lg` ensemble)
+- [x] Document authentication (deterministic fraud detection — type classification, balance math, PDF metadata)
+- [x] LLM extraction (redacted text only — Gemini 2.5 Flash, schema-constrained, output PII scan)
+- [x] Audit trail (redaction report, authenticity report, extraction metadata per job)
+- [x] Dashboard (Prometheus + Grafana — 15-panel pipeline monitor)
+- [x] Metadata persistence (confidence score, auth result, entity counts → PostgreSQL per job)
+- [x] Validation + review state (confidence threshold → NEEDS_REVIEW routing; `review_status` field for human approval)
+- [x] Review queue API (list NEEDS_REVIEW jobs, approve/reject endpoint)
+- [x] Failure-by-step metrics (Grafana panel — which pipeline stage is breaking)
+- [ ] UI (document upload, live job status, extraction viewer, redaction diff)
+  - [ ] Surface auth flags in review queue (reviewer sees *why* document was flagged, not just `authentic: false`)
 
 ---
 
