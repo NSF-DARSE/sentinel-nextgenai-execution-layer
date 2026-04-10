@@ -62,14 +62,14 @@ Make the system demo-ready and visually inspectable.
 
 ### LLM Backend
 
-The extraction step currently uses **Claude Sonnet 4.6** (Anthropic API) via `src/api/app/extractor.py`. The LLM backend and the deployment platform are independent — swapping one does not require changing the other.
+The extraction step currently uses **Gemini 2.5 Flash** (Google AI API) via `src/api/app/extractor.py`. The LLM backend and the deployment platform are independent — swapping one does not require changing the other.
 
 | Option | When to use | What changes |
 |---|---|---|
-| **Claude (Anthropic API)** | Development, testing, paid production | `ANTHROPIC_API_KEY` in `.env`; `extractor.py` as-is |
-| **Gemini on Vertex AI** | GCP deployment with university credits covering Vertex AI | Swap `extractor.py` to Vertex AI SDK; schema and prompt are identical |
+| **Gemini Flash (Google AI API)** | Current — development and testing | `GOOGLE_API_KEY` in `.env`; `extractor.py` as-is |
+| **Gemini on Vertex AI** | GCP deployment with university credits | Swap `extractor.py` to Vertex AI SDK; schema and prompt are identical |
 
-The extraction schema, system prompt, PII scan, and audit trail are backend-agnostic. If university GCP credits cover Vertex AI usage, swap to Gemini before the GCP demo with a one-file change. At demo/pilot scale (~thousands of documents), Claude API cost is negligible (~$0.01/document). At true batch scale, Vertex AI may be preferable for cost and co-location with the rest of the GCP stack.
+The extraction schema, system prompt, PII scan, and audit trail are backend-agnostic. Moving from the Google AI API to Vertex AI (for GCP deployment) is a one-file change in `extractor.py`.
 
 ### Phase 2 — Cloud Deployment (GCP)
 Migrate the dockerized local stack to GCP with minimal code changes.
@@ -124,10 +124,27 @@ This architecture is designed for batch processing — think thousands of custom
 
 ### Phase 1 — Frontend & Demo-ready
 - [ ] UI — document upload, live job status polling, extracted output viewer, redaction diff
-- [ ] Review queue UI — surface auth flags (reviewer sees *why* document was flagged, not just `authentic: false`)
+- [ ] Review queue UI — reviewer sees **why** a document was flagged, not just a score (see explainability note below)
 - [ ] Sample anonymized bank statement PDFs for a self-contained demo
 - [ ] Document relevance check — post-parse classify whether doc is actually financial (reject receipts, leases, etc. early)
 - [ ] Prompt + model versioning locked into audit trail per job
+
+#### Explainability requirement (right to explanation)
+
+Laws like **ECOA** (US fair lending) and **GDPR Article 22** (EU) require that automated decisions affecting people — like flagging or rejecting a loan application — come with a **specific, human-readable reason**. "The AI gave it a 0.74" is not a reason. It is not legally defensible and it is not fair to the person being reviewed.
+
+**What the review queue UI must show (not just the confidence score):**
+
+| Signal | Where it comes from | What it tells the reviewer |
+|---|---|---|
+| `risk_flags.overdraft_occurrences` | Gemini, grounded in document | How many overdrafts were observed |
+| `risk_flags.nsf_fee_occurrences` | Gemini, grounded in document | Non-sufficient funds events |
+| `risk_flags.document_integrity_flag` | Gemini math check | Document figures are self-contradictory |
+| `risk_flags.notes` | Gemini free-text | Plain English explanation of any flags |
+| `authentic` + `auth_confidence` | Authenticator (deterministic) | Balance math, PDF metadata checks |
+| `confidence_score` | Gemini self-report | Summary indicator only — never the sole reason shown |
+
+The confidence score is a **routing signal** (below 0.80 → human review). It is not an explanation. The `risk_flags` and `notes` fields are the explanation. The UI must surface both.
 
 ### Phase 2 — Cloud Deployment (GCP)
 - [ ] MinIO → Cloud Storage (GCS) — s3-compatible, swap env var only
@@ -143,55 +160,71 @@ This architecture is designed for batch processing — think thousands of custom
 
 ---
 
-## Repository Structure
-...
-```mermaid
-graph LR
-    %% Node Definitions
-    UI["💻 Front-End<br/>Customer / Business view<br/>Streamlit"]
-    API["⚙️ API Gateway<br/>FastAPI"]
-    Q["📥 Queue / Broker<br/>Redis"]
-    ENG["🧠 Sentinel Engine<br/>Celery Workers"]
+## Architecture
 
-    subgraph DATA [Data Layer]
-        S3["🗄️ MinIO / S3<br/>Raw PDFs & Artifacts"]
-        PG["🐘 Postgres<br/>Metadata & Audit"]
+```mermaid
+graph TD
+    %% Frontend
+    UI["💻 Streamlit Frontend<br/>Upload · Track · Review Queue<br/>Score breakdown · Redaction preview"]
+
+    %% API
+    API["⚙️ FastAPI<br/>Upload · Status · Results<br/>Redacted preview · Review queue"]
+
+    %% Queue
+    Q["📥 Redis<br/>Job queue / broker"]
+
+    %% Pipeline steps
+    subgraph PIPELINE [Celery Worker — Pipeline]
+        P1["📄 Parse<br/>pdfplumber → text"]
+        P2["🔍 Authenticate<br/>Balance math · PDF metadata<br/>Fraud detection"]
+        P3["🛡️ Redact<br/>Presidio + spaCy<br/>PII → typed placeholders"]
+        P4["🤖 Gemini 2.5 Flash<br/>Structured extraction<br/>Risk flags · Findings"]
+        P5["📊 Score<br/>Deterministic 100-pt scorecard<br/>Reason codes · Hard stops"]
+        P6["🗑️ Cleanup<br/>Delete raw PDF + parsed text<br/>Data minimization"]
+        P1 --> P2 --> P3 --> P4 --> P5 --> P6
     end
 
+    %% Data layer
+    subgraph DATA [Data Layer]
+        S3["🗄️ MinIO<br/>Redacted text · Reports<br/>Extraction · Score breakdown"]
+        PG["🐘 Postgres<br/>Job status · Confidence score<br/>Auth result · Entity counts"]
+    end
+
+    %% Observability
     subgraph OBS [Observability]
         PROM["🔥 Prometheus"]
-        GRAF["📊 Grafana"]
+        GRAF["📊 Grafana<br/>15-panel dashboard"]
     end
 
-    %% Connections
-    UI -->|Upload / Query| API
-    API -->|Store raw PDF| S3
-    API -->|Write job metadata| PG
-    API -->|Enqueue job| Q
-    Q --> ENG
-    ENG -->|Persist results| S3
-    ENG -->|Update status| PG
-    API -->|Fetch results| PG
-    API -->|Fetch artifacts| S3
-    API -->|Report| UI
+    %% Flow
+    UI -->|"Upload PDF"| API
+    API -->|"Store raw PDF"| S3
+    API -->|"Create job record"| PG
+    API -->|"Enqueue"| Q
+    Q --> P1
+    P5 -->|"Store artifacts"| S3
+    P5 -->|"Update score + status"| PG
+    API -->|"GET /jobs/{id}/results"| S3
+    API -->|"GET /jobs/{id}/redacted-preview"| S3
+    API -->|"Poll status"| PG
+    API -->|"Results + preview"| UI
 
     API -->|metrics| PROM
-    ENG -->|metrics| PROM
+    PIPELINE -->|metrics| PROM
     PROM --> GRAF
-    GRAF -->|Dashboard| UI
 
     %% Styling
     classDef ui fill:#e1f5fe,stroke:#01579b,stroke-width:2px,color:#01579b;
     classDef api fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20;
     classDef queue fill:#fff3e0,stroke:#ef6c00,stroke-width:2px,color:#e65100;
-    classDef engine fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#4a148c;
+    classDef pipeline fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#4a148c;
     classDef data fill:#eceff1,stroke:#455a64,stroke-width:2px,color:#263238;
     classDef obs fill:#fffde7,stroke:#fbc02d,stroke-width:2px,color:#f57f17;
 
     class UI ui;
     class API api;
     class Q queue;
-    class ENG engine;
+    class P1,P2,P3,P4,P5,P6 pipeline;
     class S3,PG data;
     class PROM,GRAF obs;
 ```

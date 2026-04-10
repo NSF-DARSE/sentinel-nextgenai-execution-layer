@@ -25,6 +25,45 @@ celery_app.conf.result_serializer = "json"
 celery_app.conf.accept_content = ["json"]
 
 
+def _cleanup_raw_artifacts(minio, doc_id: str) -> None:
+    """
+    Delete PII-containing artifacts from MinIO once the full pipeline is complete.
+
+    Why: raw PDFs and unredacted parsed text have served their purpose after
+    extraction. Keeping them is unnecessary liability — data minimization means
+    only retain what you actually need going forward.
+
+    Keeps (all PII-free): redacted text, redaction report, authenticity report,
+    extraction JSON, extraction meta.
+    Deletes: raw/{doc_id}/* and parsed/{doc_id}/extracted.txt
+    """
+    from minio.deleteobjects import DeleteObject
+
+    log = logging.getLogger(__name__)
+    keys_to_delete = []
+
+    # Collect all raw objects (handles any filename variation)
+    try:
+        for obj in minio.list_objects(MINIO_BUCKET, prefix=f"raw/{doc_id}/"):
+            keys_to_delete.append(DeleteObject(obj.object_name))
+    except Exception:
+        log.warning("doc_id=%s could not list raw/ objects for cleanup", doc_id)
+
+    # Unredacted parsed text
+    keys_to_delete.append(DeleteObject(f"parsed/{doc_id}/extracted.txt"))
+
+    if not keys_to_delete:
+        log.info("doc_id=%s no raw artifacts to clean up", doc_id)
+        return
+
+    errors = list(minio.remove_objects(MINIO_BUCKET, iter(keys_to_delete)))
+    if errors:
+        for err in errors:
+            log.warning("doc_id=%s cleanup error: %s", doc_id, err)
+    else:
+        log.info("doc_id=%s cleaned up %d raw artifact(s)", doc_id, len(keys_to_delete))
+
+
 def _set_job_status(
     db: Session, job: Job, status: JobStatus, error_message: str | None = None
 ) -> None:
@@ -107,7 +146,7 @@ def parse_document(self, job_id: str, doc_id: str, filename: str) -> None:
         try:
             job = db.get(Job, job_id)
             if job:
-                _set_job_status(db, job, JobStatus.FAILED, error_message=str(exc)[:1024])
+                _set_job_status(db, job, JobStatus.FAILED, error_message=f"[parse] {exc}"[:1024])
         except Exception:
             pass
         raise
@@ -203,7 +242,7 @@ def authenticate_document(self, job_id: str, doc_id: str, filename: str) -> None
         try:
             job = db.get(Job, job_id)
             if job:
-                _set_job_status(db, job, JobStatus.FAILED, error_message=str(exc)[:1024])
+                _set_job_status(db, job, JobStatus.FAILED, error_message=f"[authenticate] {exc}"[:1024])
         except Exception:
             pass
         raise
@@ -292,7 +331,7 @@ def redact_document(self, job_id: str, doc_id: str) -> None:
         try:
             job = db.get(Job, job_id)
             if job:
-                _set_job_status(db, job, JobStatus.FAILED, error_message=str(exc)[:1024])
+                _set_job_status(db, job, JobStatus.FAILED, error_message=f"[redact] {exc}"[:1024])
         except Exception:
             pass
         raise
@@ -371,16 +410,53 @@ def extract_document(self, job_id: str, doc_id: str) -> None:
             job_id, meta_key, meta.get("input_tokens"), meta.get("output_tokens"),
         )
 
-        # Quality checkpoint: persist confidence score to Postgres
-        confidence = result.get("confidence_score")
+        # Fetch auth report so the scorer can use deterministic auth results
+        auth_report: dict = {}
+        try:
+            auth_key = f"authenticated/{doc_id}/authenticity_report.json"
+            auth_resp = minio.get_object(MINIO_BUCKET, auth_key)
+            try:
+                auth_report = json.loads(auth_resp.read().decode("utf-8"))
+            finally:
+                auth_resp.close()
+                auth_resp.release_conn()
+        except Exception:
+            log.warning("job_id=%s could not fetch auth report for scoring — proceeding without it", job_id)
+
+        # Deterministic scoring — reason codes, not "the AI said so"
+        from app.scorer import compute_score
+        score_result = compute_score(result, auth_report)
+
+        score_bytes = json.dumps(score_result, ensure_ascii=False, indent=2).encode("utf-8")
+        score_key = f"extracted/{doc_id}/score_breakdown.json"
+        minio.put_object(
+            MINIO_BUCKET, score_key, io.BytesIO(score_bytes),
+            length=len(score_bytes), content_type="application/json",
+        )
+        log.info(
+            "job_id=%s score=%.4f flags=%s recommendation=%s",
+            job_id, score_result["score"], score_result["flags"], score_result["recommendation"],
+        )
+
+        # Persist deterministic score to Postgres
+        confidence = score_result["score"]
         from sqlalchemy import func as sqlfunc2
         job.confidence_score = confidence
         job.updated_at       = sqlfunc2.now()
         db.commit()
 
-        # Route to NEEDS_REVIEW if confidence < 0.80 or document not authentic
-        if confidence is not None and confidence < 0.80:
-            log.warning("job_id=%s confidence=%.2f below threshold → NEEDS_REVIEW", job_id, confidence)
+        # Route to NEEDS_REVIEW if:
+        # - confidence is missing (unknown = unsafe default → human review)
+        # - confidence below threshold
+        # - document failed authentication
+        CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.80"))
+
+        if confidence is None:
+            log.warning("job_id=%s confidence not returned by LLM → NEEDS_REVIEW", job_id)
+            _set_job_status(db, job, JobStatus.NEEDS_REVIEW)
+            record_job_outcome("needs_review")
+        elif confidence < CONFIDENCE_THRESHOLD:
+            log.warning("job_id=%s confidence=%.2f below threshold=%.2f → NEEDS_REVIEW", job_id, confidence, CONFIDENCE_THRESHOLD)
             _set_job_status(db, job, JobStatus.NEEDS_REVIEW)
             record_job_outcome("needs_review")
         elif job.authentic is False:
@@ -388,10 +464,16 @@ def extract_document(self, job_id: str, doc_id: str) -> None:
             _set_job_status(db, job, JobStatus.NEEDS_REVIEW)
             record_job_outcome("needs_review")
         else:
+            log.info("job_id=%s all checks passed → SUCCEEDED", job_id)
             _set_job_status(db, job, JobStatus.SUCCEEDED)
             record_job_outcome("succeeded")
         record_step("extract", time.time() - start)
         log.info("job_id=%s status=%s confidence=%s", job_id, job.status, confidence)
+
+        # Pipeline complete — delete raw PII artifacts from MinIO.
+        # This runs regardless of SUCCEEDED vs NEEDS_REVIEW: the raw PDF and
+        # unredacted text are no longer needed either way.
+        _cleanup_raw_artifacts(minio, doc_id)
 
     except Exception as exc:
         log.exception("job_id=%s extract failed: %s", job_id, exc)
@@ -403,7 +485,7 @@ def extract_document(self, job_id: str, doc_id: str) -> None:
         try:
             job = db.get(Job, job_id)
             if job:
-                _set_job_status(db, job, JobStatus.FAILED, error_message=str(exc)[:1024])
+                _set_job_status(db, job, JobStatus.FAILED, error_message=f"[extract] {exc}"[:1024])
         except Exception:
             pass
         # PII scan failures are hard stops — don't retry, don't risk propagation.

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 from uuid import UUID
@@ -10,7 +12,6 @@ from app.schemas import (
     DocumentCreate,
     DocumentCreateResponse,
     JobStatusResponse,
-    DocumentUploadResponse,
     ReviewQueueItem,
     ReviewDecision,
     ReviewResponse,
@@ -74,6 +75,9 @@ def upload_document(
     # Enqueue parse → redact → extract chain after committing so workers can find the records.
     # .si() (immutable signature) ensures the None return of each step is not forwarded
     # to the next, so each task receives only its own explicit arguments.
+    #
+    # If enqueue fails (e.g. Redis is down), mark the job FAILED immediately so it
+    # doesn't sit as QUEUED forever with no worker ever picking it up.
     try:
         from celery import chain
         from app.worker import authenticate_document, redact_document, extract_document
@@ -84,6 +88,11 @@ def upload_document(
             extract_document.si(str(job.id), str(doc.id)),
         ).apply_async()
     except Exception as exc:
+        from sqlalchemy import func
+        job.status = JobStatus.FAILED
+        job.error_message = f"Enqueue failed: {str(exc)[:200]}"
+        job.updated_at = func.now()
+        db.commit()
         raise HTTPException(status_code=503, detail=f"Failed to enqueue pipeline: {exc}")
 
     return DocumentCreateResponse(document_id=doc.id, job_id=job.id, status=job.status.value)
@@ -123,9 +132,6 @@ def submit_review(job_id: UUID, payload: ReviewDecision, db: Session = Depends(g
     - approved → status becomes SUCCEEDED
     - rejected → status becomes FAILED
     """
-    if payload.decision not in ("approved", "rejected"):
-        raise HTTPException(status_code=400, detail="decision must be 'approved' or 'rejected'")
-
     job = db.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -141,6 +147,94 @@ def submit_review(job_id: UUID, payload: ReviewDecision, db: Session = Depends(g
     db.commit()
 
     return ReviewResponse(job_id=job.id, status=job.status.value, review_status=job.review_status)
+
+
+@router.get("/jobs/{job_id}/results")
+def get_job_results(job_id: UUID, db: Session = Depends(get_db)):
+    """Fetch all artifacts for a completed job from MinIO."""
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    from app.models import Document
+    doc = db.get(Document, job.document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    doc_id = str(doc.id)
+    minio = get_minio_client()
+    result: dict = {}
+
+    def _fetch(key: str):
+        try:
+            resp = minio.get_object(MINIO_BUCKET, key)
+            try:
+                return json.loads(resp.read().decode("utf-8"))
+            finally:
+                resp.close()
+                resp.release_conn()
+        except Exception:
+            return None
+
+    extraction = _fetch(f"extracted/{doc_id}/extraction.json")
+    if extraction:
+        result["extraction"] = extraction
+
+    score = _fetch(f"extracted/{doc_id}/score_breakdown.json")
+    if score:
+        result["score_breakdown"] = score
+
+    auth = _fetch(f"authenticated/{doc_id}/authenticity_report.json")
+    if auth:
+        result["authenticity_report"] = auth
+
+    redaction = _fetch(f"redacted/{doc_id}/redaction_report.json")
+    if redaction:
+        result["redaction_report"] = redaction
+
+    if not result:
+        raise HTTPException(status_code=404, detail="No results available yet")
+
+    return result
+
+
+@router.get("/jobs/{job_id}/redacted-preview")
+def get_redacted_preview(job_id: UUID, db: Session = Depends(get_db)):
+    """Return the redacted text with PII placeholders for the frontend diff view."""
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    from app.models import Document
+    doc = db.get(Document, job.document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    doc_id = str(doc.id)
+    minio = get_minio_client()
+
+    try:
+        resp = minio.get_object(MINIO_BUCKET, f"redacted/{doc_id}/redacted.txt")
+        try:
+            redacted_text = resp.read().decode("utf-8")
+        finally:
+            resp.close()
+            resp.release_conn()
+    except Exception:
+        raise HTTPException(status_code=404, detail="Redacted text not yet available")
+
+    redaction_report = []
+    try:
+        resp = minio.get_object(MINIO_BUCKET, f"redacted/{doc_id}/redaction_report.json")
+        try:
+            redaction_report = json.loads(resp.read().decode("utf-8"))
+        finally:
+            resp.close()
+            resp.release_conn()
+    except Exception:
+        pass
+
+    return {"redacted_text": redacted_text, "redaction_report": redaction_report}
 
 
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)

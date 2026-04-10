@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pydantic import BaseModel
+from typing import Literal
+from pydantic import BaseModel, Field
 from uuid import UUID
 
 
@@ -24,13 +25,6 @@ class JobStatusResponse(BaseModel):
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
-class DocumentUploadResponse(BaseModel):
-    document_id: UUID
-    job_id: UUID
-    status: str
-    s3_key: str
-
-
 class ReviewQueueItem(BaseModel):
     job_id: UUID
     document_id: UUID
@@ -45,8 +39,8 @@ class ReviewQueueItem(BaseModel):
 
 
 class ReviewDecision(BaseModel):
-    decision: str  # "approved" or "rejected"
-    notes: str | None = None
+    decision: Literal["approved", "rejected"]
+    notes: str | None = Field(None, max_length=2048)
 
 
 class ReviewResponse(BaseModel):

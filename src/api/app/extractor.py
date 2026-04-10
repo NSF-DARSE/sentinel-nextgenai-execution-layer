@@ -7,12 +7,13 @@ Contract:
   - Guarantee: the LLM NEVER receives raw PII.  Redaction runs before this
                module is called — enforced by the pipeline, not by trust.
 
-Current backend: Anthropic Claude via the Claude API.
-  - Set ANTHROPIC_API_KEY in your .env / docker-compose.yml
-  - Structured output is enforced via tool_use with a fixed input_schema —
-    the model is constrained to return only the fields defined in the schema.
+Current backend: Google Gemini Flash via the Gemini API.
+  - Set GOOGLE_API_KEY in your .env / docker-compose.yml
+  - Structured output is enforced via response_mime_type="application/json"
+    with a fixed response_schema — the model is constrained to return only
+    the fields defined in the schema.
 
-After Claude responds, an output PII scan checks the raw response string for
+After Gemini responds, an output PII scan checks the raw response string for
 structured PII patterns (SSN, email, phone, account numbers) before the result
 is parsed or stored.  Any hit aborts extraction and fails the job — preventing
 downstream propagation of a redaction miss.
@@ -25,22 +26,26 @@ import os
 import re
 from typing import Any
 
-import anthropic
+from google import genai
+from google.genai import types
 
 log = logging.getLogger(__name__)
 
 # ── Versioning ────────────────────────────────────────────────────────────────
 # Bump PROMPT_VERSION when the prompt or schema changes so the audit trail
 # records which version produced each extraction result.
-PROMPT_VERSION = "v3.0"
+PROMPT_VERSION = "v5.0"  # v5: removed LLM self-reported confidence — score is now deterministic (scorer.py)
 
-MODEL = "claude-sonnet-4-6"
+MODEL = "gemini-2.5-flash"
 
-# ── Tool schema (enforces structured output via tool_use) ─────────────────────
+# ── Response schema (enforces structured JSON output) ─────────────────────────
 # The schema is intentionally narrow: no field can hold a name, raw account
-# number, or SSN. The schema itself acts as a guardrail — Claude cannot
+# number, or SSN. The schema itself acts as a guardrail — Gemini cannot
 # reproduce PII that the schema has no slot for.
-_TOOL_SCHEMA: dict[str, Any] = {
+#
+# Note: nullable fields use {"type": "string", "nullable": true} (Gemini format)
+# rather than {"type": ["string", "null"]} (JSON Schema format).
+_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "document_type": {
@@ -49,18 +54,21 @@ _TOOL_SCHEMA: dict[str, Any] = {
             "description": "Classified document type."
         },
         "analysis_period": {
-            "type": ["string", "null"],
+            "type": "string",
+            "nullable": True,
             "description": "Date range or tax year covered by the document."
         },
         "income": {
             "type": "object",
             "properties": {
                 "monthly_net_estimated": {
-                    "type": ["number", "null"],
+                    "type": "number",
+                    "nullable": True,
                     "description": "Estimated monthly net income in USD. For annual docs (w2/tax_return), divide annual figure by 12."
                 },
                 "annual_gross": {
-                    "type": ["number", "null"],
+                    "type": "number",
+                    "nullable": True,
                     "description": "Annual gross income in USD. Populate for w2 and tax_return only."
                 },
                 "sources": {
@@ -79,9 +87,9 @@ _TOOL_SCHEMA: dict[str, Any] = {
             "type": "object",
             "description": "Balance data. Populate only for bank_statement; set all fields to null for other types.",
             "properties": {
-                "opening_balance": {"type": ["number", "null"]},
-                "closing_balance": {"type": ["number", "null"]},
-                "average_daily_balance_estimated": {"type": ["number", "null"]}
+                "opening_balance": {"type": "number", "nullable": True},
+                "closing_balance": {"type": "number", "nullable": True},
+                "average_daily_balance_estimated": {"type": "number", "nullable": True}
             },
             "required": ["opening_balance", "closing_balance", "average_daily_balance_estimated"]
         },
@@ -113,7 +121,8 @@ _TOOL_SCHEMA: dict[str, Any] = {
                     "description": "True if the document contains mathematical inconsistencies, self-labels as doctored/fraudulent, or has self-contradictory figures."
                 },
                 "notes": {
-                    "type": ["string", "null"],
+                    "type": "string",
+                    "nullable": True,
                     "description": "Free-text explanation of any flags raised, or null if none."
                 }
             },
@@ -130,20 +139,16 @@ _TOOL_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "properties": {
                     "category": {"type": "string"},
-                    "average_monthly_amount": {"type": ["number", "null"]},
+                    "average_monthly_amount": {"type": "number", "nullable": True},
                     "frequency": {"type": "string", "enum": ["weekly", "biweekly", "monthly", "irregular"]}
                 },
                 "required": ["category", "frequency"]
             }
         },
-        "confidence_score": {
-            "type": "number",
-            "description": "0.0–1.0. Use 0.90+ for clean fully-populated docs; 0.80–0.89 for minor gaps; 0.50–0.79 for significant missing fields; below 0.50 if document_integrity_flag is true or type is unknown."
-        }
     },
     "required": [
         "document_type", "income", "account_summary",
-        "risk_flags", "recurring_expenses", "confidence_score"
+        "risk_flags", "recurring_expenses"
     ]
 }
 
@@ -156,8 +161,8 @@ Personal identifiers — names, account numbers, SSNs, addresses, phone numbers 
 have been replaced with typed placeholders such as [PERSON], [US_SSN],
 [ACCOUNT_NUMBER], [LOCATION], [PHONE_NUMBER].
 
-Your task: call the extract_financial_profile tool with the structured risk profile
-extracted from the document. You must always call the tool — never respond in plain text.
+Your task: return a structured JSON risk profile extracted from the document.
+You must always return valid JSON matching the schema exactly — never respond in plain text.
 
 DOCUMENT TYPE RULES:
 - "bank_statement": monthly account activity with transaction history, opening/closing balances.
@@ -196,82 +201,68 @@ _OUTPUT_PII_PATTERNS: list[tuple[str, str]] = [
 
 
 def _scan_output_for_pii(response_text: str) -> list[str]:
+    # re.findall scans the entire string — catches every match, not just the first.
+    # A security scanner that stops at the first hit is only half a scanner.
     warnings: list[str] = []
     for label, pattern in _OUTPUT_PII_PATTERNS:
-        match = re.search(pattern, response_text)
-        if match:
+        matches = re.findall(pattern, response_text)
+        for match in matches:
             warnings.append(
-                f"Potential {label} found in LLM output: '{match.group()[:30]}'"
+                f"Potential {label} found in LLM output: '{match[:30]}'"
             )
     return warnings
 
 
 def extract_from_redacted(redacted_text: str) -> dict[str, Any]:
     """
-    Send *redacted_text* to Claude and return a parsed risk profile dict.
+    Send *redacted_text* to Gemini and return a parsed risk profile dict.
 
-    Uses tool_use with a fixed input_schema to enforce structured output —
-    Claude is constrained to populate only the fields defined in _TOOL_SCHEMA.
+    Uses response_mime_type="application/json" with a fixed response_schema to
+    enforce structured output — Gemini is constrained to populate only the
+    fields defined in _RESPONSE_SCHEMA.
 
     Raises:
-        RuntimeError — if ANTHROPIC_API_KEY is not set.
+        RuntimeError — if GOOGLE_API_KEY is not set.
         ValueError   — if the output PII scan finds leaked structured PII.
-        RuntimeError — if Claude does not return a tool_use block.
-        RuntimeError — on API errors.
+        RuntimeError — on API errors or empty responses.
     """
-    api_key = os.getenv("ANTHROPIC_API_KEY")
+    api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
         raise RuntimeError(
-            "ANTHROPIC_API_KEY environment variable is not set. "
+            "GOOGLE_API_KEY environment variable is not set. "
             "Add it to your .env file."
         )
 
-    client = anthropic.Anthropic(api_key=api_key)
+    client = genai.Client(api_key=api_key)
 
-    log.info("Calling Claude model=%s prompt_version=%s", MODEL, PROMPT_VERSION)
+    log.info("Calling Gemini model=%s prompt_version=%s", MODEL, PROMPT_VERSION)
 
-    response = client.messages.create(
+    response = client.models.generate_content(
         model=MODEL,
-        max_tokens=4096,
-        system=_SYSTEM_PROMPT,
-        tools=[{
-            "name": "extract_financial_profile",
-            "description": "Extract a structured financial risk profile from the redacted document text.",
-            "input_schema": _TOOL_SCHEMA,
-        }],
-        tool_choice={"type": "tool", "name": "extract_financial_profile"},
-        messages=[{
-            "role": "user",
-            "content": (
-                "Extract the financial risk profile from the following redacted document.\n\n"
-                f"{redacted_text}"
-            )
-        }],
+        contents=(
+            "Extract the financial risk profile from the following redacted document.\n\n"
+            f"{redacted_text}"
+        ),
+        config=types.GenerateContentConfig(
+            system_instruction=_SYSTEM_PROMPT,
+            response_mime_type="application/json",
+            response_schema=_RESPONSE_SCHEMA,
+        ),
     )
 
-    usage = response.usage
+    usage = response.usage_metadata
     log.info(
-        "Claude responded: model=%s input_tokens=%d output_tokens=%d stop_reason=%s",
+        "Gemini responded: model=%s input_tokens=%d output_tokens=%d",
         MODEL,
-        usage.input_tokens if usage else -1,
-        usage.output_tokens if usage else -1,
-        response.stop_reason,
+        usage.prompt_token_count if usage else -1,
+        usage.candidates_token_count if usage else -1,
     )
 
-    # Extract the tool_use block
-    tool_block = next(
-        (b for b in response.content if b.type == "tool_use"),
-        None,
-    )
-    if tool_block is None:
-        raise RuntimeError(
-            f"Claude did not return a tool_use block. stop_reason={response.stop_reason}"
-        )
-
-    result: dict[str, Any] = tool_block.input
+    raw_json = response.text
+    if not raw_json:
+        raise RuntimeError("Gemini returned an empty response.")
 
     # ── Output PII scan ───────────────────────────────────────────────────────
-    raw_json = json.dumps(result)
     pii_warnings = _scan_output_for_pii(raw_json)
     if pii_warnings:
         log.error("OUTPUT PII SCAN FAILED — aborting extraction. Warnings: %s", pii_warnings)
@@ -280,12 +271,14 @@ def extract_from_redacted(redacted_text: str) -> dict[str, Any]:
             "Extraction aborted to prevent downstream propagation."
         )
 
+    result: dict[str, Any] = json.loads(raw_json)
+
     # Stamp versioning metadata — stored separately in extraction_meta.json.
     result["_meta"] = {
         "model": MODEL,
         "prompt_version": PROMPT_VERSION,
-        "input_tokens": usage.input_tokens if usage else None,
-        "output_tokens": usage.output_tokens if usage else None,
+        "input_tokens": usage.prompt_token_count if usage else None,
+        "output_tokens": usage.candidates_token_count if usage else None,
     }
 
     return result

@@ -8,11 +8,16 @@ from .metrics import SentinelJobCollector, SentinelWorkerCollector
 
 app = FastAPI(title="Sentinel API", version="0.0.1")
 
+_ALLOWED_ORIGINS = [
+    "http://localhost:8501",   # Streamlit (Phase 1 frontend)
+    "http://localhost:3000",   # React fallback if we go that route
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
 )
 
 # Register custom DB + Redis collectors
