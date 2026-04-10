@@ -81,16 +81,6 @@ Migrate the dockerized local stack to GCP with minimal code changes.
 | Redis (Docker) | Cloud Memorystore | Swap Redis URL |
 | FastAPI + Worker | Cloud Run | Push image to Artifact Registry, deploy |
 
-### Phase 3 — Databricks Integration
-Introduce Databricks for the audit trail, analytics, and model governance layers.
-
-- **Delta Lake** — replace (or mirror) PostgreSQL audit events with append-only Delta tables; immutable by design, regulators love it
-- **MLflow** (built into Databricks) — prompt versioning, model tracking, extraction confidence metrics over time
-- **Databricks SQL** — analytics dashboard across all jobs: accuracy trends, redaction patterns, model drift
-- **Unity Catalog** — data governance and lineage for the extracted structured outputs
-
-> Databricks runs natively on GCP, so Phase 2 and Phase 3 coexist in the same cloud.
-
 ## LLM Extraction & Agentic Phase
 
 The next phase of the pipeline introduces LLM-based extraction — but the core guarantee does not change. The LLM only ever receives redacted text. Redaction always runs first. This is enforced by the pipeline, not by trust.
@@ -113,18 +103,10 @@ An orchestrator coordinates both agents. Evaluation always runs first; credit an
 This architecture is designed for batch processing — think thousands of customer loan applications processed overnight, each file moving through the same guaranteed pipeline with no human reading a single raw document. The agents operate in parallel across a worker pool, the audit trail captures every step, and the entire run is observable via the metrics layer.
 
 ---
-## Checklist
-- [ ] Providing deatils on failure jobs
-- [ ] Setup an Output directory
-- [ ] SAve the Metadata into Postgres Database
-- [ ] Test out different usecases
-- [ ] Possibly engineer some data for downstream folks
-- [ ] Setup Google API account
-- [ ] Setup a Confidence Score
 
----
+## Project Status
 
-**Project status**
+### Phase 0 — MVP (complete)
 - [x] Repo initialized
 - [x] API: upload PDF
 - [x] Storage: raw PDF + metadata (MinIO + PostgreSQL)
@@ -139,8 +121,25 @@ This architecture is designed for batch processing — think thousands of custom
 - [x] Validation + review state (confidence threshold → NEEDS_REVIEW routing; `review_status` field for human approval)
 - [x] Review queue API (list NEEDS_REVIEW jobs, approve/reject endpoint)
 - [x] Failure-by-step metrics (Grafana panel — which pipeline stage is breaking)
-- [ ] UI (document upload, live job status, extraction viewer, redaction diff)
-  - [ ] Surface auth flags in review queue (reviewer sees *why* document was flagged, not just `authentic: false`)
+
+### Phase 1 — Frontend & Demo-ready
+- [ ] UI — document upload, live job status polling, extracted output viewer, redaction diff
+- [ ] Review queue UI — surface auth flags (reviewer sees *why* document was flagged, not just `authentic: false`)
+- [ ] Sample anonymized bank statement PDFs for a self-contained demo
+- [ ] Document relevance check — post-parse classify whether doc is actually financial (reject receipts, leases, etc. early)
+- [ ] Prompt + model versioning locked into audit trail per job
+
+### Phase 2 — Cloud Deployment (GCP)
+- [ ] MinIO → Cloud Storage (GCS) — s3-compatible, swap env var only
+- [ ] PostgreSQL → Cloud SQL — swap `DATABASE_URL`
+- [ ] Redis → Cloud Memorystore — swap Redis URL
+- [ ] FastAPI + Celery → Cloud Run — push image to Artifact Registry, deploy
+- [ ] CI/CD to Cloud Run via GitHub Actions
+
+### Phase 3 — Agentic Pipeline (Google ADK)
+- [ ] Document Evaluation Agent — relevance check before extraction
+- [ ] Credit Analysis Agent — gated behind evaluation, structured extraction
+- [ ] Orchestrator coordinating both agents
 
 ---
 

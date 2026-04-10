@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
 from prometheus_client import REGISTRY
 
@@ -6,6 +7,13 @@ from .routes import router
 from .metrics import SentinelJobCollector, SentinelWorkerCollector
 
 app = FastAPI(title="Sentinel API", version="0.0.1")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Register custom DB + Redis collectors
 REGISTRY.register(SentinelJobCollector())
