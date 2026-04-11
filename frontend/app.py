@@ -320,6 +320,14 @@ def render_upload_tab():
         time.sleep(2)
         st.rerun()
 
+    # One-shot settle: first time we land on a terminal status, give MinIO a moment
+    # to finish writing artifacts before we try fetching them.
+    settle_key = f"settled_{job_id}"
+    if not st.session_state.get(settle_key):
+        st.session_state[settle_key] = True
+        time.sleep(1.5)
+        st.rerun()
+
     if status == "FAILED":
         error = job.get("error_message") or "Unknown error"
         stage = "unknown stage"
@@ -382,8 +390,17 @@ def render_upload_tab():
         res_resp = api_get(f"/jobs/{job_id}/results")
         if res_resp.ok:
             render_results(res_resp.json(), job)
+        elif res_resp.status_code == 404:
+            col_msg, col_btn = st.columns([4, 1])
+            with col_msg:
+                st.info("Results are still being finalized...")
+            with col_btn:
+                if st.button("🔄 Refresh", key="refresh_results"):
+                    # clear settle flag so timing doesn't re-trigger
+                    st.session_state.pop(settle_key, None)
+                    st.rerun()
         else:
-            st.info("Results not yet available — try refreshing.")
+            st.warning(f"Could not load results ({res_resp.status_code}).")
     except Exception as e:
         st.error(f"Could not load results: {e}")
 

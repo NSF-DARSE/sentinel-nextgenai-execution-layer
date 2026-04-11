@@ -1,46 +1,62 @@
-# Case Study: Sentinel — Next-Gen AI Execution Layer
+# SENTINEL — Scalable, ENabled, Trustworthy Infrastructure for Next-genAI Execution Layer
 
-## Overview
-Financial institutions receive **PDF-based unstructured documents** (especially **bank statements** and paystubs). Manual review is slow and expensive, but “just run an LLM on it” is risky because these docs contain **PII/PCI**.
+> **Industry partner:** Best Egg (fintech / personal loans) · Mike Urban, Chief Technology Operations Officer  
+> **Course:** CISC 867010 — Pilot Research Software Engineering, University of Delaware (Spring 2026)  
+> **Faculty sponsor:** Prof. Sunita Chandrasekaran
 
-**Sentinel** is a workflow orchestration + policy enforcement layer that enables **safe AI extraction** by ensuring the LLM only ever sees **redacted** content, while producing **auditable evidence** and **observability signals** that prove the system is doing what it claims.
+## What Best Egg Asked For
 
-**Stakeholders**
-- **Business / Underwriting / Ops:** wants fast structured outputs (not the whole raw document)
-- **Risk & Compliance / Security:** needs hard guarantees (no raw PII to LLM, safe logging, least privilege)
-- **Data/Platform Engineering:** needs reliable orchestration (queues, retries, idempotency, DLQ)
-- **ML/LLM Engineers:** need a controlled extraction workflow (schema, prompt/model versioning)
-- **Auditors:** need traceable lineage (what ran, when, on what input, with what model/prompt)
+> *”Help define and create a scalable, resilient and secure GenAI infrastructure and orchestration layer [to integrate more unstructured data] … and do that in a scalable, resilient, and secure way.”*
 
-**MVP focus**
-PDFs → **safe redaction** → **LLM-based structured extraction (redacted only)** → validation → **audit + dashboard**
+Best Egg processes thousands of personal loan applications. Applicants submit unstructured financial documents — bank statements, paystubs, W-2s — that must be reviewed before a lending decision. Today this is a slow, manual, human-in-the-loop process. GenAI can accelerate it, but Best Egg operates in a highly regulated industry: a reckless integration creates legal, compliance, and reputational risk.
 
-### Key mappings
-| Phrase | Technical understanding |
+**What they need is not just an LLM call. They need a framework** — an infrastructure layer that ingests raw documents, strips PII before anything reaches the model, extracts structured signals, and proves it did all of this correctly via a dashboard.
+
+### Deliverables (from the brief)
+1. **Framework** — the end-to-end pipeline (upload → parse → redact → extract → validate → store)
+2. **Visualization dashboard** — proves the framework is delivering on scalability, resiliency, and security
+3. **Infrastructure** — the actual running system, not just a prototype sketch
+
+### Three properties that cannot be traded off
+| Property | What it means in this system |
 |---|---|
-| “Sentinel layer” | Orchestration + policy enforcement layer |
-| “AI checks documents” | LLM extraction workflow (schema-defined structured output) |
-| “Hide sensitive data” | PII detection + redaction/tokenization step |
-| “Make sure nothing leaks” | Egress controls + safe logging + least privilege |
-| “Track what happened” | Audit trail (lineage: inputs/outputs/steps/models) |
-| “Show it’s working” | Observability dashboard (metrics/logs/traces) |
-| “Flag if something is off” | Validation + confidence thresholds + review queue |
+| **Scalable** | Async job queue (Celery + Redis), horizontal workers, Prometheus throughput metrics |
+| **Resilient** | Retries with backoff, dead-letter routing, idempotent pipeline steps, audit trail per step |
+| **Secure** | PII never reaches the LLM (enforced by pipeline order, not discipline); safe logging; least privilege |
+
+### What Sentinel produces (for downstream lending systems)
+Each processed document generates:
+- **Structured extraction** — income, account balances, recurring transactions, risk flags
+- **Deterministic confidence score** — 100-point scorecard with reason codes (not “AI said 0.74”)
+- **Audit trail** — redaction report, authenticity report, model + prompt version, artifact hashes
+- **Review queue entry** (if flagged) — human reviewer sees *why*, not just a score
+
+### Stakeholders
+| Role | What they need from Sentinel |
+|---|---|
+| Underwriting / Ops | Fast structured outputs from raw documents — no manual reading |
+| Risk & Compliance | Hard guarantee: LLM never sees raw PII; every decision has a traceable reason |
+| Platform Engineering | Reliable async orchestration — queues, retries, idempotency, failure visibility |
+| ML/LLM Engineering | Controlled extraction — schema-pinned, model + prompt versioned, output PII scan |
+| Auditors | Full lineage per job: what ran, when, on what input, with what model/prompt version |
+| Human Reviewers | Explainable flags (ECOA / GDPR right-to-explanation — “AI said so” is not a reason) |
 
 **Scope (MVP)**
-- **PDF only** (start with **digital bank statement PDFs**)
-- End-to-end: upload → parse → redact → LLM extract → validate → store → observe
+- **PDF only** — digital bank statements, paystubs, W-2s
+- End-to-end: upload → parse → redact → LLM extract → score → validate → store → observe
 
 **Core guarantees**
-- **Privacy guarantee:** LLM receives **only redacted text** (never raw PII)
-- **Auditability:** evidence for every step (timestamps, versions, artifact hashes/IDs)
-- **Reliability:** job state, retries/backoff, idempotency, DLQ
-- **Observability:** throughput/latency/failures + security indicators (redaction counts, policy blocks)
+- **Privacy:** LLM receives only redacted text — enforced by pipeline order, not discipline
+- **Auditability:** evidence artifact for every step (timestamps, versions, artifact IDs)
+- **Reliability:** job state machine, retries/backoff, idempotency, DLQ
+- **Observability:** throughput/latency/failure metrics + security indicators (redaction counts, policy blocks)
+- **Explainability:** every routing decision (PASS/NEEDS_REVIEW) backed by named reason codes
 
-**Beyond MVP (explicitly out of scope for the first demo)**
-- OCR for scanned PDFs
-- Email/chat/image ingestion
-- Multi-tenant governance + enterprise RBAC
-- Policy engine (e.g., OPA), tokenization vault, stronger prompt-injection defenses
+**Out of scope for MVP**
+- OCR for scanned/image PDFs
+- Email, chat, image ingestion
+- Multi-tenant RBAC / enterprise policy engine (OPA)
+- Tokenization vault, stronger prompt-injection defenses
 
 ---
 
