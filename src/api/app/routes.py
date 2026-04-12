@@ -80,9 +80,10 @@ def upload_document(
     # doesn't sit as QUEUED forever with no worker ever picking it up.
     try:
         from celery import chain
-        from app.worker import authenticate_document, redact_document, extract_document
+        from app.worker import classify_document, authenticate_document, redact_document, extract_document
         chain(
             parse_document.s(str(job.id), str(doc.id), file.filename),
+            classify_document.si(str(job.id), str(doc.id)),
             authenticate_document.si(str(job.id), str(doc.id), file.filename),
             redact_document.si(str(job.id), str(doc.id)),
             extract_document.si(str(job.id), str(doc.id)),

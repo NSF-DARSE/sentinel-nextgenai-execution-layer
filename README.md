@@ -139,10 +139,10 @@ This architecture is designed for batch processing — think thousands of custom
 - [x] Failure-by-step metrics (Grafana panel — which pipeline stage is breaking)
 
 ### Phase 1 — Frontend & Demo-ready
-- [ ] UI — document upload, live job status polling, extracted output viewer, redaction diff
-- [ ] Review queue UI — reviewer sees **why** a document was flagged, not just a score (see explainability note below)
+- [x] UI — document upload, live job status polling, extracted output viewer, redaction diff (`frontend/app.py`)
+- [x] Review queue UI — reviewer sees **why** a document was flagged, score breakdown with reason codes, approve/reject with mandatory written reason
+- [x] Document relevance check — post-parse keyword classifier rejects non-financial docs (receipts, leases, etc.) before any LLM call
 - [ ] Sample anonymized bank statement PDFs for a self-contained demo
-- [ ] Document relevance check — post-parse classify whether doc is actually financial (reject receipts, leases, etc. early)
 - [ ] Prompt + model versioning locked into audit trail per job
 
 #### Explainability requirement (right to explanation)

@@ -154,6 +154,135 @@ def parse_document(self, job_id: str, doc_id: str, filename: str) -> None:
         db.close()
 
 
+# ---------------------------------------------------------------------------
+# Keyword sets for relevance classification.
+# A document must match at least _MIN_MATCHES keywords from a single category
+# to be considered a financial document. Uses case-insensitive substring search.
+# ---------------------------------------------------------------------------
+_FINANCIAL_KEYWORDS: dict[str, list[str]] = {
+    "bank_statement": [
+        "account balance", "checking account", "savings account",
+        "available balance", "statement period", "beginning balance", "ending balance",
+        "withdrawal", "routing number", "overdraft", "direct deposit",
+        "account number", "daily balance",
+    ],
+    "paystub": [
+        "gross pay", "net pay", "pay period", "pay date",
+        "year to date", "ytd", "federal income tax",
+        "social security", "medicare", "deductions", "hours worked",
+        "earnings statement", "pay stub", "payroll",
+    ],
+    "w2": [
+        "form w-2", "wages, tips", "federal income tax withheld",
+        "social security wages", "medicare wages", "employer identification",
+        "wage and tax statement",
+    ],
+    "tax_return": [
+        "form 1040", "adjusted gross income", "taxable income",
+        "filing status", "standard deduction", "tax refund",
+        "schedule a", "schedule b", "schedule c", "form 1099",
+    ],
+}
+_MIN_MATCHES = 2
+
+
+def _classify_text(text: str) -> tuple[bool, str]:
+    """
+    Returns (is_financial, category_label).
+    Checks each financial category; a document is accepted if it matches
+    at least _MIN_MATCHES keywords from any single category.
+    Returns the best-matching category name, or "unknown" if none qualifies.
+    """
+    lower = text.lower()
+    best_category = "unknown"
+    best_count = 0
+    for category, keywords in _FINANCIAL_KEYWORDS.items():
+        count = sum(1 for kw in keywords if kw in lower)
+        if count > best_count:
+            best_count = count
+            best_category = category
+    is_financial = best_count >= _MIN_MATCHES
+    return is_financial, best_category if is_financial else "unknown"
+
+
+@celery_app.task(bind=True, max_retries=0)
+def classify_document(self, job_id: str, doc_id: str) -> None:
+    """
+    Relevance gate: fetch parsed/{doc_id}/extracted.txt from MinIO and run a
+    keyword-based classifier to confirm this is a financial document (bank
+    statement, paystub, W-2, or tax return).
+
+    If the document is not financial, the job is marked FAILED with a clear
+    reason code and the pipeline chain is aborted — no redaction or LLM call
+    is made. This prevents wasting API quota on irrelevant uploads.
+
+    Runs after parse, before authenticate. No MinIO writes — read-only step.
+    Idempotent: safe to re-run.
+    """
+    from celery.exceptions import Ignore
+    from app.metrics import record_step, record_step_failure, record_classify_rejection
+
+    log = logging.getLogger(__name__)
+    start = time.time()
+
+    db: Session = SessionLocal()
+    try:
+        job = db.get(Job, job_id)
+        if job is None:
+            log.error("job_id=%s not found in DB", job_id)
+            return
+
+        log.info("job_id=%s doc_id=%s classify status=RUNNING", job_id, doc_id)
+        _set_job_status(db, job, JobStatus.RUNNING)
+
+        minio = get_minio_client()
+        ensure_bucket(minio)
+
+        parsed_key = f"parsed/{doc_id}/extracted.txt"
+        response = minio.get_object(MINIO_BUCKET, parsed_key)
+        try:
+            parsed_text = response.read().decode("utf-8")
+        finally:
+            response.close()
+            response.release_conn()
+
+        is_financial, category = _classify_text(parsed_text)
+
+        if not is_financial:
+            msg = (
+                f"[classify] Document is not a financial statement: "
+                f"classified as '{category}'. "
+                f"Upload a bank statement, paystub, W-2, or tax return."
+            )
+            log.warning("job_id=%s doc_id=%s %s", job_id, doc_id, msg)
+            _set_job_status(db, job, JobStatus.FAILED, error_message=msg[:1024])
+            record_step("classify", time.time() - start)
+            record_step_failure("classify")
+            record_classify_rejection()
+            raise Ignore()  # abort the Celery chain without triggering retries
+
+        log.info("job_id=%s doc_id=%s classified as '%s' → relevant", job_id, doc_id, category)
+        _set_job_status(db, job, JobStatus.SUCCEEDED)
+        record_step("classify", time.time() - start)
+
+    except Exception as exc:
+        from celery.exceptions import Ignore as _Ignore
+        if isinstance(exc, _Ignore):
+            raise  # already handled above — let Celery swallow it
+        log.exception("job_id=%s classify failed: %s", job_id, exc)
+        record_step("classify", time.time() - start)
+        record_step_failure("classify")
+        try:
+            job = db.get(Job, job_id)
+            if job:
+                _set_job_status(db, job, JobStatus.FAILED, error_message=f"[classify] {exc}"[:1024])
+        except Exception:
+            pass
+        raise
+    finally:
+        db.close()
+
+
 @celery_app.task(bind=True, max_retries=0)
 def authenticate_document(self, job_id: str, doc_id: str, filename: str) -> None:
     """
