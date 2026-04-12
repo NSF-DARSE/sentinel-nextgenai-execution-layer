@@ -261,12 +261,15 @@ def redact_text(text: str) -> Tuple[str, List[dict]]:
     # Tag each audit entry with which detector caught it.
     presidio_spans = {(r.start, r.end) for r in presidio_results}
 
+    # original_value is intentionally excluded — storing the raw PII text in the
+    # audit trail would defeat the purpose of redaction (data minimization).
+    # start/end offsets plus entity_type are sufficient for audit purposes.
     audit: List[dict] = [
         {
             "entity_type": r.entity_type,
             "start": r.start,
             "end": r.end,
-            "original_value": text[r.start: r.end],
+            "char_count": r.end - r.start,
             "detector": "presidio" if (r.start, r.end) in presidio_spans else "spacy_ensemble",
         }
         for r in sorted(results, key=lambda r: r.start)

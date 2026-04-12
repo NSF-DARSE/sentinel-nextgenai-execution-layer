@@ -64,6 +64,23 @@ def _cleanup_raw_artifacts(minio, doc_id: str) -> None:
         log.info("doc_id=%s cleaned up %d raw artifact(s)", doc_id, len(keys_to_delete))
 
 
+def _cleanup_or_warn(doc_id: str) -> None:
+    """
+    Best-effort cleanup of PII-containing raw artifacts on failure paths.
+
+    Called whenever a pipeline task fails or rejects a document so that raw
+    PDFs and unredacted parsed text are not left in MinIO indefinitely.
+    Swallows all errors — cleanup failure must never mask the original error.
+    """
+    log = logging.getLogger(__name__)
+    try:
+        minio = get_minio_client()
+        ensure_bucket(minio)
+        _cleanup_raw_artifacts(minio, doc_id)
+    except Exception:
+        log.warning("doc_id=%s best-effort cleanup failed on error path", doc_id)
+
+
 def _set_job_status(
     db: Session, job: Job, status: JobStatus, error_message: str | None = None
 ) -> None:
@@ -143,6 +160,7 @@ def parse_document(self, job_id: str, doc_id: str, filename: str) -> None:
         record_step("parse", time.time() - start)
         record_step_failure("parse")
         record_job_outcome("failed")
+        _cleanup_or_warn(doc_id)
         try:
             job = db.get(Job, job_id)
             if job:
@@ -259,6 +277,7 @@ def classify_document(self, job_id: str, doc_id: str) -> None:
             record_step("classify", time.time() - start)
             record_step_failure("classify")
             record_classify_rejection()
+            _cleanup_or_warn(doc_id)
             raise Ignore()  # abort the Celery chain without triggering retries
 
         log.info("job_id=%s doc_id=%s classified as '%s' → relevant", job_id, doc_id, category)
@@ -272,6 +291,7 @@ def classify_document(self, job_id: str, doc_id: str) -> None:
         log.exception("job_id=%s classify failed: %s", job_id, exc)
         record_step("classify", time.time() - start)
         record_step_failure("classify")
+        _cleanup_or_warn(doc_id)
         try:
             job = db.get(Job, job_id)
             if job:
@@ -368,6 +388,7 @@ def authenticate_document(self, job_id: str, doc_id: str, filename: str) -> None
         record_step("authenticate", time.time() - start)
         record_step_failure("authenticate")
         record_job_outcome("failed")
+        _cleanup_or_warn(doc_id)
         try:
             job = db.get(Job, job_id)
             if job:
@@ -457,6 +478,7 @@ def redact_document(self, job_id: str, doc_id: str) -> None:
         record_step("redact", time.time() - start)
         record_step_failure("redact")
         record_job_outcome("failed")
+        _cleanup_or_warn(doc_id)
         try:
             job = db.get(Job, job_id)
             if job:
@@ -611,6 +633,9 @@ def extract_document(self, job_id: str, doc_id: str) -> None:
         record_job_outcome("failed")
         if isinstance(exc, ValueError) and "PII scan" in str(exc):
             record_pii_leak_block()
+        # Raw PDF and parsed text are never needed by extract (it reads only the
+        # redacted artifact). Clean up now even if we are about to retry.
+        _cleanup_or_warn(doc_id)
         try:
             job = db.get(Job, job_id)
             if job:
