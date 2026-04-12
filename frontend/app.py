@@ -79,6 +79,20 @@ def check_api() -> bool:
     except requests.exceptions.ConnectionError:
         return False
 
+# ── Markdown safety helper ────────────────────────────────────────────────────
+
+def _md(text: str) -> str:
+    """
+    Escape characters that Streamlit's markdown renderer treats specially.
+    Dollar signs are the primary culprit — Streamlit >= 1.35 interprets
+    $...$ as LaTeX math, so a note like "balance ($3,500) does not match ($3,501)"
+    gets sent to the LaTeX engine and renders as garbled character-per-line output.
+    """
+    if not text:
+        return text
+    return text.replace("$", r"\$")
+
+
 # ── Redaction preview renderer ────────────────────────────────────────────────
 
 def colorize_redacted(text: str) -> str:
@@ -156,7 +170,7 @@ def render_score_breakdown(score_data: dict) -> None:
             detail = item["detail"]
             delta  = f"+{pts}" if pts == total else f"+{pts}/{total}"
             st.markdown(
-                f'&nbsp;&nbsp;&nbsp;{icon} `{code}` &nbsp; **{delta} pts** — {detail}'
+                f'&nbsp;&nbsp;&nbsp;{icon} `{code}` &nbsp; **{delta} pts** — {_md(detail)}'
             )
 
 # ── Results renderer ──────────────────────────────────────────────────────────
@@ -225,7 +239,7 @@ def render_results(results: dict, job: dict) -> None:
 
     notes = risk.get("notes")
     if notes:
-        st.info(f"**LLM analysis note:** {notes}")
+        st.info(f"**LLM analysis note:** {_md(notes)}")
 
     # ── Score breakdown ───────────────────────────────────────────────────────
     if score_data:
@@ -490,7 +504,7 @@ def render_review_tab():
                     risk = extraction.get("risk_flags") or {}
                     notes = risk.get("notes")
                     if notes:
-                        st.info(f"**LLM analysis note:** {notes}")
+                        st.info(f"**LLM analysis note:** {_md(notes)}")
             except Exception:
                 st.caption("Could not load score details.")
 
