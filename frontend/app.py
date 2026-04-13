@@ -14,7 +14,7 @@ from collections import Counter
 import requests
 import streamlit as st
 
-API_URL = "http://localhost:8000"
+API_URL = st.secrets.get("API_URL", "http://localhost:8000")
 
 st.set_page_config(
     page_title="Sentinel",

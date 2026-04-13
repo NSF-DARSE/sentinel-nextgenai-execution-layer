@@ -2,6 +2,9 @@
 docs/build/
 docs/_build/
 
+# Streamlit secrets — never commit (use secrets.toml.example as template)
+.streamlit/secrets.toml
+
 # Sensitive data — never commit
 tests/fixtures/*.pdf
 tests/fixtures/*.csv
