@@ -8,9 +8,9 @@
 
 > *”Help define and create a scalable, resilient and secure GenAI infrastructure and orchestration layer [to integrate more unstructured data] … and do that in a scalable, resilient, and secure way.”*
 
-Best Egg processes thousands of personal loan applications. Applicants submit unstructured financial documents — bank statements, paystubs, W-2s — that must be reviewed before a lending decision. Today this is a slow, manual, human-in-the-loop process. GenAI can accelerate it, but Best Egg operates in a highly regulated industry: a reckless integration creates legal, compliance, and reputational risk.
+Best Egg processes thousands of personal loan applications. Applicants submit unstructured financial documents, bank statements, paystubs, W-2s that must be reviewed before a lending decision. Today this is a slow, manual, human-in-the-loop process. GenAI can accelerate it, but Best Egg operates in a highly regulated industry: a reckless integration creates legal, compliance, and reputational risk.
 
-**What they need is not just an LLM call. They need a framework** — an infrastructure layer that ingests raw documents, strips PII before anything reaches the model, extracts structured signals, and proves it did all of this correctly via a dashboard.
+**What they need is not just an LLM call. They need a framework**, an infrastructure layer that ingests raw documents, strips PII before anything reaches the model, extracts structured signals, and proves it did all of this correctly via a dashboard.
 
 ### Deliverables (from the brief)
 1. **Framework** — the end-to-end pipeline (upload → parse → redact → extract → validate → store)
@@ -34,15 +34,15 @@ Each processed document generates:
 ### Stakeholders
 | Role | What they need from Sentinel |
 |---|---|
-| Underwriting / Ops | Fast structured outputs from raw documents — no manual reading |
+| Underwriting / Ops | Fast structured outputs from raw documents, no manual reading |
 | Risk & Compliance | Hard guarantee: LLM never sees raw PII; every decision has a traceable reason |
-| Platform Engineering | Reliable async orchestration — queues, retries, idempotency, failure visibility |
-| ML/LLM Engineering | Controlled extraction — schema-pinned, model + prompt versioned, output PII scan |
+| Platform Engineering | Reliable async orchestration queues, retries, idempotency, failure visibility |
+| ML/LLM Engineering | Controlled extraction schema-pinned, model + prompt versioned, output PII scan |
 | Auditors | Full lineage per job: what ran, when, on what input, with what model/prompt version |
-| Human Reviewers | Explainable flags (ECOA / GDPR right-to-explanation — “AI said so” is not a reason) |
+| Human Reviewers | Explainable flags (ECOA / GDPR right-to-explanation “AI said so” is not a reason) |
 
 **Scope (MVP)**
-- **PDF only** — digital bank statements, paystubs, W-2s
+- **PDF only**, digital bank statements, paystubs, W-2s
 - End-to-end: upload → parse → redact → LLM extract → score → validate → store → observe
 
 **Core guarantees**
@@ -55,8 +55,6 @@ Each processed document generates:
 **Out of scope for MVP**
 - OCR for scanned/image PDFs
 - Email, chat, image ingestion
-- Multi-tenant RBAC / enterprise policy engine (OPA)
-- Tokenization vault, stronger prompt-injection defenses
 
 ---
 
@@ -109,14 +107,14 @@ The first implementation is a single extraction step. After redaction completes,
 
 The single-step extraction evolves into a two-agent pipeline orchestrated via Google Agent Development Kit (ADK):
 
-- **Document Evaluation Agent** — runs first. Performs a relevance check on the parsed and redacted text to determine whether the document is actually a financial document (bank statement, paystub). This catches documents that cleared the Level 1 input guardrails — valid PDFs with financial keywords — but aren't genuinely relevant at a semantic level, like a restaurant bill or a lease agreement. Documents that fail relevance are rejected here with a reason, before any extraction attempt.
-- **Credit Analysis Agent** — runs only if the Document Evaluation Agent passes the file. Takes the redacted text and performs structured extraction: income verification, balance trends, risk classification, and anomaly flags.
+- **Document Evaluation Agent** runs first. Performs a relevance check on the parsed and redacted text to determine whether the document is actually a financial document (bank statement, paystub). This catches documents that cleared the Level 1 input guardrails — valid PDFs with financial keywords but aren't genuinely relevant at a semantic level, like a restaurant bill or a lease agreement. Documents that fail relevance are rejected here with a reason, before any extraction attempt.
+- **Credit Analysis Agent** runs only if the Document Evaluation Agent passes the file. Takes the redacted text and performs structured extraction: income verification, balance trends, risk classification, and anomaly flags.
 
 An orchestrator coordinates both agents. Evaluation always runs first; credit analysis is gated behind it. Neither agent receives anything other than redacted text.
 
 **Why this matters at scale**
 
-This architecture is designed for batch processing — think thousands of customer loan applications processed overnight, each file moving through the same guaranteed pipeline with no human reading a single raw document. The agents operate in parallel across a worker pool, the audit trail captures every step, and the entire run is observable via the metrics layer.
+This architecture is designed for batch processing think thousands of customer loan applications processed overnight, each file moving through the same guaranteed pipeline with no human reading a single raw document. The agents operate in parallel across a worker pool, the audit trail captures every step, and the entire run is observable via the metrics layer.
 
 ---
 
@@ -148,7 +146,7 @@ This architecture is designed for batch processing — think thousands of custom
 
 #### Explainability requirement (right to explanation)
 
-Laws like **ECOA** (US fair lending) and **GDPR Article 22** (EU) require that automated decisions affecting people — like flagging or rejecting a loan application — come with a **specific, human-readable reason**. "The AI gave it a 0.74" is not a reason. It is not legally defensible and it is not fair to the person being reviewed.
+Laws like **ECOA** (US fair lending) and **GDPR Article 22** (EU) require that automated decisions affecting people like flagging or rejecting a loan application come with a **specific, human-readable reason**. "The AI gave it a 0.74" is not a reason. It is not legally defensible and it is not fair to the person being reviewed.
 
 **What the review queue UI must show (not just the confidence score):**
 
