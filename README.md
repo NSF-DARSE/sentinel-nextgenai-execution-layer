@@ -142,8 +142,9 @@ This architecture is designed for batch processing — think thousands of custom
 - [x] UI — document upload, live job status polling, extracted output viewer, redaction diff (`frontend/app.py`)
 - [x] Review queue UI — reviewer sees **why** a document was flagged, score breakdown with reason codes, approve/reject with mandatory written reason
 - [x] Document relevance check — post-parse keyword classifier rejects non-financial docs (receipts, leases, etc.) before any LLM call
-- [ ] Sample anonymized bank statement PDFs for a self-contained demo
-- [ ] Prompt + model versioning locked into audit trail per job
+- [x] Sample anonymized bank statement PDFs for a self-contained demo
+- [x] Prompt + model versioning locked into audit trail per job
+- [ ] Follow-Up (the info missing and need more to perform a confidence review)
 
 #### Explainability requirement (right to explanation)
 
