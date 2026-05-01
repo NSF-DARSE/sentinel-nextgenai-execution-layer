@@ -53,7 +53,7 @@ jobs:
             --memory 2Gi \
             --timeout 300 \
             --vpc-connector sentinel-vpc-conn \
-            --set-env-vars "DATABASE_URL=${{ secrets.DATABASE_URL }},REDIS_URL=${{ secrets.REDIS_URL }},USE_GCS=true,STORAGE_BUCKET=${{ secrets.STORAGE_BUCKET }},GCP_PROJECT_ID=${{ env.PROJECT_ID }}"
+            --set-env-vars "DATABASE_URL=${{ secrets.DATABASE_URL }},REDIS_URL=${{ secrets.REDIS_URL }},USE_GCS=true,STORAGE_BUCKET=${{ secrets.STORAGE_BUCKET }},GCP_PROJECT_ID=${{ env.PROJECT_ID }},SENTINEL_MODE=api"
 
       # ── Deploy Worker ──────────────────────────────────────────────────────
       - name: Deploy Worker to Cloud Run
@@ -66,9 +66,7 @@ jobs:
             --memory 2Gi \
             --timeout 300 \
             --vpc-connector sentinel-vpc-conn \
-            --command "celery" \
-            --args "-A,app.worker.celery_app,worker,--loglevel=info" \
-            --set-env-vars "DATABASE_URL=${{ secrets.DATABASE_URL }},REDIS_URL=${{ secrets.REDIS_URL }},USE_GCS=true,STORAGE_BUCKET=${{ secrets.STORAGE_BUCKET }},GCP_PROJECT_ID=${{ env.PROJECT_ID }}"
+            --set-env-vars "DATABASE_URL=${{ secrets.DATABASE_URL }},REDIS_URL=${{ secrets.REDIS_URL }},USE_GCS=true,STORAGE_BUCKET=${{ secrets.STORAGE_BUCKET }},GCP_PROJECT_ID=${{ env.PROJECT_ID }},SENTINEL_MODE=worker"
 
       # ── Deploy Frontend ────────────────────────────────────────────────────
       - name: Deploy Frontend to Cloud Run
