@@ -193,8 +193,11 @@ def extract_from_redacted(redacted_text: str) -> dict[str, Any]:
     """
     log.info("Calling Vertex AI model=%s project=%s", MODEL_NAME, PROJECT_ID)
 
+    # Use the constructor for system_instruction which is the standard for 
+    # google-cloud-aiplatform >= 1.46.0
     model = GenerativeModel(
         model_name=MODEL_NAME,
+        system_instruction=[_SYSTEM_PROMPT]
     )
 
     response = model.generate_content(
@@ -203,7 +206,6 @@ def extract_from_redacted(redacted_text: str) -> dict[str, Any]:
             response_mime_type="application/json",
             response_schema=_RESPONSE_SCHEMA,
         ),
-        system_instruction=[_SYSTEM_PROMPT],
     )
 
     raw_json = response.text
