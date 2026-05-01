@@ -52,6 +52,7 @@ jobs:
             --allow-unauthenticated \
             --memory 2Gi \
             --timeout 300 \
+            --vpc-connector sentinel-vpc-conn \
             --set-env-vars "DATABASE_URL=${{ secrets.DATABASE_URL }},REDIS_URL=${{ secrets.REDIS_URL }},USE_GCS=true,STORAGE_BUCKET=${{ secrets.STORAGE_BUCKET }},GCP_PROJECT_ID=${{ env.PROJECT_ID }}"
 
       # ── Deploy Worker ──────────────────────────────────────────────────────
@@ -64,6 +65,7 @@ jobs:
             --no-cpu-throttling \
             --memory 2Gi \
             --timeout 300 \
+            --vpc-connector sentinel-vpc-conn \
             --command "celery" \
             --args "-A,app.worker.celery_app,worker,--loglevel=info" \
             --set-env-vars "DATABASE_URL=${{ secrets.DATABASE_URL }},REDIS_URL=${{ secrets.REDIS_URL }},USE_GCS=true,STORAGE_BUCKET=${{ secrets.STORAGE_BUCKET }},GCP_PROJECT_ID=${{ env.PROJECT_ID }}"
@@ -77,4 +79,5 @@ jobs:
             --region ${{ env.REGION }} \
             --platform managed \
             --allow-unauthenticated \
+            --vpc-connector sentinel-vpc-conn \
             --set-env-vars "API_URL=$API_URL"
