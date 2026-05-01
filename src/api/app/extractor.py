@@ -1,22 +1,5 @@
 """
-extractor.py — LLM-based structured extraction from redacted financial text.
-
-Contract:
-  - Input:  redacted text (PII already replaced with typed placeholders).
-  - Output: structured JSON risk profile.
-  - Guarantee: the LLM NEVER receives raw PII.  Redaction runs before this
-               module is called — enforced by the pipeline, not by trust.
-
-Current backend: Google Gemini Flash via the Gemini API.
-  - Set GOOGLE_API_KEY in your .env / docker-compose.yml
-  - Structured output is enforced via response_mime_type="application/json"
-    with a fixed response_schema — the model is constrained to return only
-    the fields defined in the schema.
-
-After Gemini responds, an output PII scan checks the raw response string for
-structured PII patterns (SSN, email, phone, account numbers) before the result
-is parsed or stored.  Any hit aborts extraction and fails the job — preventing
-downstream propagation of a redaction miss.
+extractor.py — LLM-based structured extraction from redacted financial text via Vertex AI.
 """
 from __future__ import annotations
 
@@ -26,25 +9,22 @@ import os
 import re
 from typing import Any
 
-from google import genai
-from google.genai import types
+import vertexai
+from vertexai.generative_models import GenerativeModel, GenerationConfig
 
 log = logging.getLogger(__name__)
 
 # ── Versioning ────────────────────────────────────────────────────────────────
-# Bump PROMPT_VERSION when the prompt or schema changes so the audit trail
-# records which version produced each extraction result.
-PROMPT_VERSION = "v5.0"  # v5: removed LLM self-reported confidence — score is now deterministic (scorer.py)
+PROMPT_VERSION = "v5.0-vertex"
+MODEL_NAME = "gemini-1.5-flash"
 
-MODEL = "gemini-2.5-flash"
+PROJECT_ID = os.getenv("GCP_PROJECT_ID", "bestegg-cisc867010s26")
+LOCATION = os.getenv("GCP_LOCATION", "us-central1")
+
+# Initialize Vertex AI once
+vertexai.init(project=PROJECT_ID, location=LOCATION)
 
 # ── Response schema (enforces structured JSON output) ─────────────────────────
-# The schema is intentionally narrow: no field can hold a name, raw account
-# number, or SSN. The schema itself acts as a guardrail — Gemini cannot
-# reproduce PII that the schema has no slot for.
-#
-# Note: nullable fields use {"type": "string", "nullable": true} (Gemini format)
-# rather than {"type": ["string", "null"]} (JSON Schema format).
 _RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -199,86 +179,47 @@ _OUTPUT_PII_PATTERNS: list[tuple[str, str]] = [
     ("ROUTING",        r"(?i)(?:routing|aba|rtn)[^\d]{0,10}\d{9}\b"),
 ]
 
-
 def _scan_output_for_pii(response_text: str) -> list[str]:
-    # re.findall scans the entire string — catches every match, not just the first.
-    # A security scanner that stops at the first hit is only half a scanner.
     warnings: list[str] = []
     for label, pattern in _OUTPUT_PII_PATTERNS:
         matches = re.findall(pattern, response_text)
         for match in matches:
-            warnings.append(
-                f"Potential {label} found in LLM output: '{match[:30]}'"
-            )
+            warnings.append(f"Potential {label} found in LLM output: '{match[:30]}'")
     return warnings
-
 
 def extract_from_redacted(redacted_text: str) -> dict[str, Any]:
     """
-    Send *redacted_text* to Gemini and return a parsed risk profile dict.
-
-    Uses response_mime_type="application/json" with a fixed response_schema to
-    enforce structured output — Gemini is constrained to populate only the
-    fields defined in _RESPONSE_SCHEMA.
-
-    Raises:
-        RuntimeError — if GOOGLE_API_KEY is not set.
-        ValueError   — if the output PII scan finds leaked structured PII.
-        RuntimeError — on API errors or empty responses.
+    Send *redacted_text* to Vertex AI Gemini and return a parsed risk profile dict.
     """
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "GOOGLE_API_KEY environment variable is not set. "
-            "Add it to your .env file."
-        )
+    log.info("Calling Vertex AI model=%s project=%s", MODEL_NAME, PROJECT_ID)
 
-    client = genai.Client(api_key=api_key)
+    model = GenerativeModel(
+        model_name=MODEL_NAME,
+        system_instruction=[_SYSTEM_PROMPT]
+    )
 
-    log.info("Calling Gemini model=%s prompt_version=%s", MODEL, PROMPT_VERSION)
-
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=(
-            "Extract the financial risk profile from the following redacted document.\n\n"
-            f"{redacted_text}"
-        ),
-        config=types.GenerateContentConfig(
-            system_instruction=_SYSTEM_PROMPT,
+    response = model.generate_content(
+        f"Extract the financial risk profile from the following redacted document.\n\n{redacted_text}",
+        generation_config=GenerationConfig(
             response_mime_type="application/json",
             response_schema=_RESPONSE_SCHEMA,
         ),
     )
 
-    usage = response.usage_metadata
-    log.info(
-        "Gemini responded: model=%s input_tokens=%d output_tokens=%d",
-        MODEL,
-        usage.prompt_token_count if usage else -1,
-        usage.candidates_token_count if usage else -1,
-    )
-
     raw_json = response.text
     if not raw_json:
-        raise RuntimeError("Gemini returned an empty response.")
+        raise RuntimeError("Vertex AI returned an empty response.")
 
-    # ── Output PII scan ───────────────────────────────────────────────────────
     pii_warnings = _scan_output_for_pii(raw_json)
     if pii_warnings:
         log.error("OUTPUT PII SCAN FAILED — aborting extraction. Warnings: %s", pii_warnings)
-        raise ValueError(
-            f"LLM output PII scan detected potential data leak: {pii_warnings}. "
-            "Extraction aborted to prevent downstream propagation."
-        )
+        raise ValueError(f"LLM output PII scan detected potential data leak: {pii_warnings}")
 
     result: dict[str, Any] = json.loads(raw_json)
-
-    # Stamp versioning metadata — stored separately in extraction_meta.json.
     result["_meta"] = {
-        "model": MODEL,
+        "model": MODEL_NAME,
         "prompt_version": PROMPT_VERSION,
-        "input_tokens": usage.prompt_token_count if usage else None,
-        "output_tokens": usage.candidates_token_count if usage else None,
+        "project_id": PROJECT_ID,
     }
 
     return result

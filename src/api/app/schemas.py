@@ -17,13 +17,26 @@ class DocumentCreateResponse(BaseModel):
     status: str
 
 
+class BatchCreateResponse(BaseModel):
+    batch_id: UUID
+    jobs: list[DocumentCreateResponse]
+
+
 class JobStatusResponse(BaseModel):
     job_id: UUID
     document_id: UUID
     status: str
+    filename: str | None = None
     error_message: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class BatchStatusResponse(BaseModel):
+    batch_id: UUID
+    status: str  # aggregate status: RUNNING, SUCCEEDED, etc.
+    jobs: list[JobStatusResponse]
+    created_at: datetime
 
 class ReviewQueueItem(BaseModel):
     job_id: UUID

@@ -1,23 +1,27 @@
 from __future__ import annotations
 
 import json
-
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from sqlalchemy.orm import Session
+from typing import Any
 from uuid import UUID
 
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
 from app.db import get_db
-from app.models import Document, Job, JobStatus
+from app.guardrails import validate_upload
+from app.models import Batch, Document, Job, JobStatus
 from app.schemas import (
+    BatchCreateResponse,
+    BatchStatusResponse,
     DocumentCreate,
     DocumentCreateResponse,
     JobStatusResponse,
-    ReviewQueueItem,
     ReviewDecision,
+    ReviewQueueItem,
     ReviewResponse,
 )
-from app.storage import MINIO_BUCKET, ensure_bucket, get_minio_client
-from app.guardrails import validate_upload
+from app.storage import BUCKET_NAME, ensure_bucket, get_storage_client
 
 router = APIRouter()
 
@@ -42,7 +46,8 @@ def upload_document(
 ):
     validate_upload(file)
 
-    from app.worker import parse_document
+    from app.worker import parse_document, classify_document, authenticate_document, redact_document, extract_document
+    from celery import chain
 
     content_type = file.content_type or "application/pdf"
 
@@ -52,18 +57,17 @@ def upload_document(
 
     job = Job(document_id=doc.id, status=JobStatus.QUEUED)
     db.add(job)
-    db.flush()  # get IDs without committing yet
+    db.flush()
 
-    # Upload to MinIO before committing.
-    # Seek to end to measure size, then rewind for the actual upload.
+    # Upload to storage
     raw_key = f"raw/{doc.id}/{file.filename}"
-    minio = get_minio_client()
-    ensure_bucket(minio)
+    storage = get_storage_client()
+    ensure_bucket(storage)
     file.file.seek(0, 2)
     file_size = file.file.tell()
     file.file.seek(0)
-    minio.put_object(
-        MINIO_BUCKET,
+    storage.put_object(
+        BUCKET_NAME,
         raw_key,
         file.file,
         length=file_size,
@@ -72,15 +76,7 @@ def upload_document(
 
     db.commit()
 
-    # Enqueue parse → redact → extract chain after committing so workers can find the records.
-    # .si() (immutable signature) ensures the None return of each step is not forwarded
-    # to the next, so each task receives only its own explicit arguments.
-    #
-    # If enqueue fails (e.g. Redis is down), mark the job FAILED immediately so it
-    # doesn't sit as QUEUED forever with no worker ever picking it up.
     try:
-        from celery import chain
-        from app.worker import classify_document, authenticate_document, redact_document, extract_document
         chain(
             parse_document.s(str(job.id), str(doc.id), file.filename),
             classify_document.si(str(job.id), str(doc.id)),
@@ -89,7 +85,6 @@ def upload_document(
             extract_document.si(str(job.id), str(doc.id)),
         ).apply_async()
     except Exception as exc:
-        from sqlalchemy import func
         job.status = JobStatus.FAILED
         job.error_message = f"Enqueue failed: {str(exc)[:200]}"
         job.updated_at = func.now()
@@ -97,6 +92,121 @@ def upload_document(
         raise HTTPException(status_code=503, detail=f"Failed to enqueue pipeline: {exc}")
 
     return DocumentCreateResponse(document_id=doc.id, job_id=job.id, status=job.status.value)
+
+
+@router.post("/batches/upload", response_model=BatchCreateResponse)
+def upload_batch(
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+):
+    """
+    Industry-ready batch upload: processes multiple documents in a single
+    logical transaction. Returns a batch_id to track the collective status.
+    """
+    from celery import chain
+    from app.worker import (
+        parse_document, classify_document, authenticate_document,
+        redact_document, extract_document
+    )
+
+    batch = Batch()
+    db.add(batch)
+    db.flush()
+
+    storage = get_storage_client()
+    ensure_bucket(storage)
+
+    responses = []
+
+    for file in files:
+        validate_upload(file)
+        content_type = file.content_type or "application/pdf"
+
+        doc = Document(batch_id=batch.id, filename=file.filename, content_type=content_type)
+        db.add(doc)
+        db.flush()
+
+        job = Job(document_id=doc.id, status=JobStatus.QUEUED)
+        db.add(job)
+        db.flush()
+
+        # Upload to storage
+        raw_key = f"raw/{doc.id}/{file.filename}"
+        file.file.seek(0, 2)
+        file_size = file.file.tell()
+        file.file.seek(0)
+
+        storage.put_object(
+            BUCKET_NAME,
+            raw_key,
+            file.file,
+            length=file_size,
+            content_type=content_type,
+        )
+
+        # Enqueue pipeline
+        try:
+            chain(
+                parse_document.s(str(job.id), str(doc.id), file.filename),
+                classify_document.si(str(job.id), str(doc.id)),
+                authenticate_document.si(str(job.id), str(doc.id), file.filename),
+                redact_document.si(str(job.id), str(doc.id)),
+                extract_document.si(str(job.id), str(doc.id)),
+            ).apply_async()
+        except Exception as exc:
+            job.status = JobStatus.FAILED
+            job.error_message = f"Enqueue failed: {str(exc)[:200]}"
+            job.updated_at = func.now()
+
+        responses.append(DocumentCreateResponse(
+            document_id=doc.id,
+            job_id=job.id,
+            status=job.status.value
+        ))
+
+    db.commit()
+    return BatchCreateResponse(batch_id=batch.id, jobs=responses)
+
+
+@router.get("/batches/{batch_id}", response_model=BatchStatusResponse)
+def get_batch_status(batch_id: UUID, db: Session = Depends(get_db)):
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    job_statuses = []
+    for doc in batch.documents:
+        job = db.query(Job).filter(Job.document_id == doc.id).order_by(Job.created_at.desc()).first()
+        if job:
+            job_statuses.append(JobStatusResponse(
+                job_id=job.id,
+                document_id=doc.id,
+                filename=doc.filename,
+                status=job.status.value,
+                error_message=job.error_message,
+                created_at=job.created_at,
+                updated_at=job.updated_at,
+            ))
+
+    # Aggregate status
+    statuses = [j.status for j in job_statuses]
+    if not statuses:
+        aggregate = "EMPTY"
+    elif "FAILED" in statuses:
+        aggregate = "FAILED"
+    elif "RUNNING" in statuses or "QUEUED" in statuses:
+        aggregate = "RUNNING"
+    elif "NEEDS_REVIEW" in statuses:
+        aggregate = "NEEDS_REVIEW"
+    else:
+        aggregate = "SUCCEEDED"
+
+    return BatchStatusResponse(
+        batch_id=batch.id,
+        status=aggregate,
+        jobs=job_statuses,
+        created_at=batch.created_at
+    )
 
 
 @router.get("/jobs/review", response_model=list[ReviewQueueItem])
@@ -128,18 +238,12 @@ def list_review_queue(db: Session = Depends(get_db)):
 
 @router.post("/jobs/{job_id}/review", response_model=ReviewResponse)
 def submit_review(job_id: UUID, payload: ReviewDecision, db: Session = Depends(get_db)):
-    """
-    Approve or reject a NEEDS_REVIEW job.
-    - approved → status becomes SUCCEEDED
-    - rejected → status becomes FAILED
-    """
     job = db.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if job.status != JobStatus.NEEDS_REVIEW:
         raise HTTPException(status_code=409, detail=f"Job is not in NEEDS_REVIEW state (current: {job.status.value})")
 
-    from sqlalchemy import func
     job.review_status = payload.decision
     job.status = JobStatus.SUCCEEDED if payload.decision == "approved" else JobStatus.FAILED
     if payload.decision == "rejected" and payload.notes:
@@ -152,7 +256,6 @@ def submit_review(job_id: UUID, payload: ReviewDecision, db: Session = Depends(g
 
 @router.get("/jobs/{job_id}/results")
 def get_job_results(job_id: UUID, db: Session = Depends(get_db)):
-    """Fetch all artifacts for a completed job from MinIO."""
     job = db.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -163,17 +266,13 @@ def get_job_results(job_id: UUID, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Document not found")
 
     doc_id = str(doc.id)
-    minio = get_minio_client()
-    result: dict = {}
+    storage = get_storage_client()
+    result: dict[str, Any] = {}
 
     def _fetch(key: str):
         try:
-            resp = minio.get_object(MINIO_BUCKET, key)
-            try:
-                return json.loads(resp.read().decode("utf-8"))
-            finally:
-                resp.close()
-                resp.release_conn()
+            data = storage.get_object(BUCKET_NAME, key)
+            return json.loads(data.read().decode("utf-8"))
         except Exception:
             return None
 
@@ -201,7 +300,6 @@ def get_job_results(job_id: UUID, db: Session = Depends(get_db)):
 
 @router.get("/jobs/{job_id}/redacted-preview")
 def get_redacted_preview(job_id: UUID, db: Session = Depends(get_db)):
-    """Return the redacted text with PII placeholders for the frontend diff view."""
     job = db.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -212,26 +310,18 @@ def get_redacted_preview(job_id: UUID, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Document not found")
 
     doc_id = str(doc.id)
-    minio = get_minio_client()
+    storage = get_storage_client()
 
     try:
-        resp = minio.get_object(MINIO_BUCKET, f"redacted/{doc_id}/redacted.txt")
-        try:
-            redacted_text = resp.read().decode("utf-8")
-        finally:
-            resp.close()
-            resp.release_conn()
+        data = storage.get_object(BUCKET_NAME, f"redacted/{doc_id}/redacted.txt")
+        redacted_text = data.read().decode("utf-8")
     except Exception:
         raise HTTPException(status_code=404, detail="Redacted text not yet available")
 
     redaction_report = []
     try:
-        resp = minio.get_object(MINIO_BUCKET, f"redacted/{doc_id}/redaction_report.json")
-        try:
-            redaction_report = json.loads(resp.read().decode("utf-8"))
-        finally:
-            resp.close()
-            resp.release_conn()
+        data = storage.get_object(BUCKET_NAME, f"redacted/{doc_id}/redaction_report.json")
+        redaction_report = json.loads(data.read().decode("utf-8"))
     except Exception:
         pass
 

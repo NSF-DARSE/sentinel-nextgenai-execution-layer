@@ -20,7 +20,7 @@ Best Egg processes thousands of personal loan applications. Applicants submit un
 ### Three properties that cannot be traded off
 | Property | What it means in this system |
 |---|---|
-| **Scalable** | Async job queue (Celery + Redis), horizontal workers, Prometheus throughput metrics |
+| **Scalable** | **Batch processing (multi-file upload)**, async job queue (Celery + Redis), horizontal workers, Prometheus throughput metrics |
 | **Resilient** | Retries with backoff, dead-letter routing, idempotent pipeline steps, audit trail per step |
 | **Secure** | PII never reaches the LLM (enforced by pipeline order, not discipline); safe logging; least privilege |
 
@@ -68,11 +68,12 @@ Pipeline: `upload → parse → redact → LLM extract → validate → store �
 ### Phase 1 — Presentable (target: following week)
 Make the system demo-ready and visually inspectable.
 
-- **UI dashboard** — document upload, live job status polling, extracted structured output viewer, redaction diff (what got blacked out and why)
-- **Grafana dashboards** — pre-configured panels for throughput, latency, redaction counts, failure rates, review queue depth
-- **Prompt + model versioning** — every LLM extraction job records model name, prompt version, and schema version in the audit trail
-- **Sample data** — anonymized demo bank statement PDFs for a self-contained demo flow
-- **Document relevance check** — after parsing, classify whether the document is financially relevant (bank statement, paystub) before passing it to redaction; irrelevant documents (flight tickets, receipts, etc.) are rejected early with a reason; batch uploads surface per-file accept/reject results to the user
+- [x] **UI dashboard** — batch document upload, live job status polling, extracted structured output viewer, redaction diff (what got blacked out and why)
+- [x] **Batch processing** — upload multiple files (e.g., bank statement + paystub) in a single application; track collective progress and individual results
+- [x] **Grafana dashboards** — pre-configured panels for throughput, latency, redaction counts, failure rates, review queue depth
+- [x] **Prompt + model versioning** — every LLM extraction job records model name, prompt version, and schema version in the audit trail
+- [x] **Sample data** — anonymized demo bank statement PDFs for a self-contained demo flow
+- [x] **Document relevance check** — after parsing, classify whether the document is financially relevant (bank statement, paystub) before passing it to redaction; irrelevant documents (flight tickets, receipts, etc.) are rejected early with a reason
 
 ### LLM Backend
 
@@ -90,31 +91,19 @@ Migrate the dockerized local stack to GCP with minimal code changes.
 
 | Local | GCP | Notes |
 |---|---|---|
-| MinIO | Cloud Storage (GCS) | S3-compatible endpoint, swap env var only |
+| MinIO | Cloud Storage (GCS) | Native GCS support added with fallback to MinIO |
 | PostgreSQL (Docker) | Cloud SQL (PostgreSQL) | Swap `DATABASE_URL` |
 | Redis (Docker) | Cloud Memorystore | Swap Redis URL |
 | FastAPI + Worker | Cloud Run | Push image to Artifact Registry, deploy |
 
-## LLM Extraction & Agentic Phase
+## Futuristic: Trusted RAG Chatbot (Phase 4+)
 
-The next phase of the pipeline introduces LLM-based extraction — but the core guarantee does not change. The LLM only ever receives redacted text. Redaction always runs first. This is enforced by the pipeline, not by trust.
+While out of scope for the current MVP, the Sentinel infrastructure is designed to support a **Private RAG (Retrieval-Augmented Generation) Chatbot**.
 
-**Step 1 — Single LLM extraction (foundation)**
-
-The first implementation is a single extraction step. After redaction completes, the Celery worker picks up the redacted text, sends it to an LLM with a structured prompt, and returns a risk profile: income, account balances, recurring transactions, overdraft flags. This output is schema-defined and versioned. The model name and prompt version are recorded in the audit trail alongside the redacted artifact that was used as input.
-
-**Step 2 — Multi-agent architecture with Google ADK**
-
-The single-step extraction evolves into a two-agent pipeline orchestrated via Google Agent Development Kit (ADK):
-
-- **Document Evaluation Agent** runs first. Performs a relevance check on the parsed and redacted text to determine whether the document is actually a financial document (bank statement, paystub). This catches documents that cleared the Level 1 input guardrails — valid PDFs with financial keywords but aren't genuinely relevant at a semantic level, like a restaurant bill or a lease agreement. Documents that fail relevance are rejected here with a reason, before any extraction attempt.
-- **Credit Analysis Agent** runs only if the Document Evaluation Agent passes the file. Takes the redacted text and performs structured extraction: income verification, balance trends, risk classification, and anomaly flags.
-
-An orchestrator coordinates both agents. Evaluation always runs first; credit analysis is gated behind it. Neither agent receives anything other than redacted text.
-
-**Why this matters at scale**
-
-This architecture is designed for batch processing think thousands of customer loan applications processed overnight, each file moving through the same guaranteed pipeline with no human reading a single raw document. The agents operate in parallel across a worker pool, the audit trail captures every step, and the entire run is observable via the metrics layer.
+Instead of sending customer data to public LLM APIs, Sentinel would:
+1.  **Ingest** the redacted and verified documents into a private Vector Database (e.g., pgvector on Cloud SQL).
+2.  **Use a Private LLM:** Use a locally-hosted LLM or Vertex AI Model Garden to answer customer questions about their application.
+3.  **Guarantee Trust:** Customers can interact with an AI that has "seen" their documents but has no access to their raw PII, ensuring that even a model hallucination or prompt injection cannot leak their sensitive data.
 
 ---
 
@@ -137,41 +126,24 @@ This architecture is designed for batch processing think thousands of customer l
 - [x] Failure-by-step metrics (Grafana panel — which pipeline stage is breaking)
 
 ### Phase 1 — Frontend & Demo-ready
-- [x] UI — document upload, live job status polling, extracted output viewer, redaction diff (`frontend/app.py`)
+- [x] UI — batch document upload, live job status polling, extracted output viewer, redaction diff (`frontend/app.py`)
 - [x] Review queue UI — reviewer sees **why** a document was flagged, score breakdown with reason codes, approve/reject with mandatory written reason
 - [x] Document relevance check — post-parse keyword classifier rejects non-financial docs (receipts, leases, etc.) before any LLM call
 - [x] Sample anonymized bank statement PDFs for a self-contained demo
 - [x] Prompt + model versioning locked into audit trail per job
 - [ ] Follow-Up (the info missing and need more to perform a confidence review)
 
-#### Explainability requirement (right to explanation)
-
-Laws like **ECOA** (US fair lending) and **GDPR Article 22** (EU) require that automated decisions affecting people like flagging or rejecting a loan application come with a **specific, human-readable reason**. "The AI gave it a 0.74" is not a reason. It is not legally defensible and it is not fair to the person being reviewed.
-
-**What the review queue UI must show (not just the confidence score):**
-
-| Signal | Where it comes from | What it tells the reviewer |
-|---|---|---|
-| `risk_flags.overdraft_occurrences` | Gemini, grounded in document | How many overdrafts were observed |
-| `risk_flags.nsf_fee_occurrences` | Gemini, grounded in document | Non-sufficient funds events |
-| `risk_flags.document_integrity_flag` | Gemini math check | Document figures are self-contradictory |
-| `risk_flags.notes` | Gemini free-text | Plain English explanation of any flags |
-| `authentic` + `auth_confidence` | Authenticator (deterministic) | Balance math, PDF metadata checks |
-| `confidence_score` | Gemini self-report | Summary indicator only — never the sole reason shown |
-
-The confidence score is a **routing signal** (below 0.80 → human review). It is not an explanation. The `risk_flags` and `notes` fields are the explanation. The UI must surface both.
-
 ### Phase 2 — Cloud Deployment (GCP)
-- [ ] MinIO → Cloud Storage (GCS) — s3-compatible, swap env var only
-- [ ] PostgreSQL → Cloud SQL — swap `DATABASE_URL`
-- [ ] Redis → Cloud Memorystore — swap Redis URL
-- [ ] FastAPI + Celery → Cloud Run — push image to Artifact Registry, deploy
-- [ ] CI/CD to Cloud Run via GitHub Actions
+- [x] MinIO → Cloud Storage (GCS) — native support added with fallback to MinIO
+- [x] PostgreSQL → Cloud SQL — environment variable ready
+- [x] Redis → Cloud Memorystore — environment variable ready
+- [x] FastAPI + Celery → Cloud Run — Dockerfiles and deploy workflow ready
+- [x] CI/CD to Cloud Run via GitHub Actions — implemented in `.github/workflows/deploy.yml`
 
 ### Phase 3 — Agentic Pipeline (Google ADK)
-- [ ] Document Evaluation Agent — relevance check before extraction
-- [ ] Credit Analysis Agent — gated behind evaluation, structured extraction
-- [ ] Orchestrator coordinating both agents
+- [ ] ~~Document Evaluation Agent — relevance check before extraction~~ (SCRAPPED)
+- [ ] ~~Credit Analysis Agent — gated behind evaluation, structured extraction~~ (SCRAPPED)
+- [ ] ~~Orchestrator coordinating both agents~~ (SCRAPPED)
 
 ---
 
@@ -180,10 +152,10 @@ The confidence score is a **routing signal** (below 0.80 → human review). It i
 ```mermaid
 graph TD
     %% Frontend
-    UI["💻 Streamlit Frontend<br/>Upload · Track · Review Queue<br/>Score breakdown · Redaction preview"]
+    UI["💻 Streamlit Frontend<br/>Batch Upload · Track · Review Queue<br/>Score breakdown · Redaction preview"]
 
     %% API
-    API["⚙️ FastAPI<br/>Upload · Status · Results<br/>Redacted preview · Review queue"]
+    API["⚙️ FastAPI<br/>Batch Upload · Status · Results<br/>Redacted preview · Review queue"]
 
     %% Queue
     Q["📥 Redis<br/>Job queue / broker"]
@@ -201,8 +173,8 @@ graph TD
 
     %% Data layer
     subgraph DATA [Data Layer]
-        S3["🗄️ MinIO<br/>Redacted text · Reports<br/>Extraction · Score breakdown"]
-        PG["🐘 Postgres<br/>Job status · Confidence score<br/>Auth result · Entity counts"]
+        S3["🗄️ MinIO / GCS<br/>Redacted text · Reports<br/>Extraction · Score breakdown"]
+        PG["🐘 Postgres / Cloud SQL<br/>Job status · Confidence score<br/>Auth result · Entity counts"]
     end
 
     %% Observability
@@ -212,60 +184,18 @@ graph TD
     end
 
     %% Flow
-    UI -->|"Upload PDF"| API
+    UI -->|"Upload Batch"| API
     API -->|"Store raw PDF"| S3
-    API -->|"Create job record"| PG
-    API -->|"Enqueue"| Q
+    API -->|"Create job records"| PG
+    API -->|"Enqueue jobs"| Q
     Q --> P1
     P5 -->|"Store artifacts"| S3
     P5 -->|"Update score + status"| PG
+    API -->|"GET /batches/{id}"| PG
     API -->|"GET /jobs/{id}/results"| S3
-    API -->|"GET /jobs/{id}/redacted-preview"| S3
-    API -->|"Poll status"| PG
     API -->|"Results + preview"| UI
 
     API -->|metrics| PROM
     PIPELINE -->|metrics| PROM
     PROM --> GRAF
-
-    %% Styling
-    classDef ui fill:#e1f5fe,stroke:#01579b,stroke-width:2px,color:#01579b;
-    classDef api fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#1b5e20;
-    classDef queue fill:#fff3e0,stroke:#ef6c00,stroke-width:2px,color:#e65100;
-    classDef pipeline fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#4a148c;
-    classDef data fill:#eceff1,stroke:#455a64,stroke-width:2px,color:#263238;
-    classDef obs fill:#fffde7,stroke:#fbc02d,stroke-width:2px,color:#f57f17;
-
-    class UI ui;
-    class API api;
-    class Q queue;
-    class P1,P2,P3,P4,P5,P6 pipeline;
-    class S3,PG data;
-    class PROM,GRAF obs;
 ```
-
----
-
-## Getting Started
-1. Clone the repository
-2. Create a feature branch
-3. Open a pull request early
-
----
-
-## Documentation
-This repository includes an optional Sphinx documentation scaffold.
-
-- Architecture & dataflow (pipeline diagram + artifacts per step)
-- Security model (what is never logged, what the LLM never sees, egress controls)
-- Audit model (event schema + lineage fields + artifact hashing)
-- Validation rules (what triggers `NEEDS_REVIEW`)
-- Observability (exact metrics emitted and what “good” looks like)
-
----
-
-## Contributing
-All changes must go through pull requests.
-- LLM input must be redacted-only (enforced by pipeline, not discipline)
-- Idempotency (retries must not duplicate artifacts/results)
-- Audit events for every step (start/end + success/failure + versions + artifact IDs)

@@ -1,0 +1,8 @@
+{
+  "model": "gemini-2.5-flash",
+  "prompt_version": "v1.0",
+  "input_tokens": 330,
+  "output_tokens": 177,
+  "doc_id": "1b191b3e-24d3-4340-b8fe-021b57218858",
+  "job_id": "922f0e38-bef1-4d66-a17c-3635787314ac"
+}

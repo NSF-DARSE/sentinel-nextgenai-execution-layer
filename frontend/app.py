@@ -279,150 +279,126 @@ def render_results(results: dict, job: dict) -> None:
 # ── Tab 1: Upload & Track ─────────────────────────────────────────────────────
 
 def render_upload_tab():
-    st.header("Upload Document")
+    st.header("Upload Documents")
     st.caption(
-        "Upload a PDF bank statement, paystub, W-2, or tax return. "
-        "The pipeline will parse it, redact all PII, run Gemini extraction, "
-        "and compute a deterministic confidence score with reason codes."
+        "Upload one or more PDF bank statements, paystubs, W-2s, or tax returns. "
+        "The pipeline will process each file independently, but you can track them as a single batch."
     )
 
-    uploaded = st.file_uploader("Choose a PDF file", type=["pdf"])
+    uploaded_files = st.file_uploader(
+        "Choose PDF files",
+        type=["pdf"],
+        accept_multiple_files=True
+    )
 
-    if uploaded:
-        if st.button("Upload & Process", type="primary"):
-            with st.spinner("Uploading to pipeline..."):
+    if uploaded_files:
+        if st.button("Upload & Process Batch", type="primary"):
+            with st.spinner(f"Uploading {len(uploaded_files)} file(s) to pipeline..."):
                 try:
-                    resp = api_post(
-                        "/documents/upload",
-                        files={"file": (uploaded.name, uploaded.getvalue(), "application/pdf")},
-                    )
+                    files_payload = [
+                        ("files", (f.name, f.getvalue(), "application/pdf"))
+                        for f in uploaded_files
+                    ]
+                    resp = api_post("/batches/upload", files=files_payload)
                     if resp.ok:
                         data = resp.json()
-                        st.session_state.job_id = data["job_id"]
+                        st.session_state.batch_id = data["batch_id"]
                         st.rerun()
                     else:
-                        st.error(f"Upload failed ({resp.status_code}): {resp.text}")
+                        st.error(f"Batch upload failed ({resp.status_code}): {resp.text}")
                 except requests.exceptions.ConnectionError:
-                    st.error(
-                        "Cannot connect to API at `http://localhost:8000`. "
-                        "Run `docker-compose up` first."
-                    )
+                    st.error("Cannot connect to API.")
 
-    job_id = st.session_state.get("job_id")
-    if not job_id:
+    batch_id = st.session_state.get("batch_id")
+    if not batch_id:
+        # Fallback for old single-job session state
+        job_id = st.session_state.get("job_id")
+        if job_id:
+            st.info(f"Tracking individual job: `{job_id}`")
+            # (Old rendering logic or just redirect to new batch-centric view)
         return
 
     st.divider()
-    st.markdown(f"**Job ID:** `{job_id}`")
+    st.markdown(f"**Batch ID:** `{batch_id}`")
 
     try:
-        job_resp = api_get(f"/jobs/{job_id}")
+        batch_resp = api_get(f"/batches/{batch_id}")
     except requests.exceptions.ConnectionError:
         st.error("Lost connection to API.")
         return
 
-    if not job_resp.ok:
-        st.error(f"Could not fetch job status ({job_resp.status_code})")
+    if not batch_resp.ok:
+        st.error(f"Could not fetch batch status ({batch_resp.status_code})")
         return
 
-    job    = job_resp.json()
-    status = job["status"]
-    icon   = STATUS_ICON.get(status, "?")
+    batch_data = batch_resp.json()
+    batch_status = batch_data["status"]
+    jobs = batch_data["jobs"]
 
-    st.markdown(f"**Status:** {icon} `{status}`")
+    st.markdown(f"**Batch Status:** {STATUS_ICON.get(batch_status, '?')} `{batch_status}`")
 
-    if status not in TERMINAL:
-        st.progress({"QUEUED": 0.05, "RUNNING": 0.5}.get(status, 0.05))
+    # Batch summary metrics
+    cols = st.columns(4)
+    total = len(jobs)
+    done = sum(1 for j in jobs if j["status"] in {"SUCCEEDED", "NEEDS_REVIEW"})
+    failed = sum(1 for j in jobs if j["status"] == "FAILED")
+    running = sum(1 for j in jobs if j["status"] in {"QUEUED", "RUNNING"})
+
+    cols[0].metric("Total Files", total)
+    cols[1].metric("Processed", done, delta=f"{done}/{total}")
+    cols[2].metric("Failed", failed, delta_color="inverse" if failed > 0 else "normal")
+    cols[3].metric("In Progress", running)
+
+    if batch_status == "RUNNING":
+        st.progress(done / total if total > 0 else 0)
         st.caption("Auto-refreshing every 2 seconds...")
         time.sleep(2)
         st.rerun()
 
-    # One-shot settle: first time we land on a terminal status, give MinIO a moment
-    # to finish writing artifacts before we try fetching them.
-    settle_key = f"settled_{job_id}"
-    if not st.session_state.get(settle_key):
-        st.session_state[settle_key] = True
-        time.sleep(1.5)
-        st.rerun()
-
-    if status == "FAILED":
-        error = job.get("error_message") or "Unknown error"
-        stage = "unknown stage"
-        if error.startswith("["):
-            stage = error.split("]")[0].strip("[")
-            error = error.split("]", 1)[-1].strip()
-        st.error(f"**Pipeline failed at stage: `{stage}`**\n\n{error}")
-        if st.button("Clear and upload another"):
-            st.session_state.pop("job_id", None)
-            st.rerun()
-        return
-
-    if status == "NEEDS_REVIEW":
-        st.warning(
-            "This document was routed to human review. "
-            "Check the score breakdown below to see exactly which checks failed. "
-            "A reviewer must approve or reject it in the **Review Queue** tab."
-        )
-    elif status == "SUCCEEDED":
-        st.success("Pipeline completed. All checks passed.")
-
-    # ── Redaction preview ─────────────────────────────────────────────────────
-    with st.expander("🔒 Redacted Document Preview", expanded=False):
-        st.caption(
-            "This is what Gemini saw — all PII replaced with typed placeholders. "
-            "Color = entity type. The raw PDF was deleted from storage after processing."
-        )
-        try:
-            prev_resp = api_get(f"/jobs/{job_id}/redacted-preview")
-            if prev_resp.ok:
-                prev = prev_resp.json()
-                redacted_text = prev.get("redacted_text", "")
-
-                # Legend
-                seen_types = set(re.findall(r'\[([A-Z_]+)\]', redacted_text))
-                if seen_types:
-                    legend_parts = []
-                    for etype in sorted(seen_types):
-                        fg, bg = ENTITY_COLORS.get(etype, DEFAULT_ENTITY_COLOR)
-                        legend_parts.append(
-                            f'<span style="background:{bg};color:{fg};border:1px solid {fg}44;'
-                            f'padding:1px 6px;border-radius:3px;font-size:0.8em">[{etype}]</span>'
-                        )
-                    st.markdown(" ".join(legend_parts), unsafe_allow_html=True)
-
-                st.markdown(
-                    f'<div style="background:#fafafa;border:1px solid #e0e0e0;padding:16px;'
-                    f'border-radius:8px;font-family:monospace;font-size:0.82em;'
-                    f'max-height:420px;overflow-y:auto;white-space:pre-wrap;line-height:1.7">'
-                    f'{colorize_redacted(redacted_text)}</div>',
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.info("Redacted preview not yet available.")
-        except Exception as e:
-            st.warning(f"Could not load preview: {e}")
-
-    # ── Full results ──────────────────────────────────────────────────────────
-    try:
-        res_resp = api_get(f"/jobs/{job_id}/results")
-        if res_resp.ok:
-            render_results(res_resp.json(), job)
-        elif res_resp.status_code == 404:
-            col_msg, col_btn = st.columns([4, 1])
-            with col_msg:
-                st.info("Results are still being finalized...")
-            with col_btn:
-                if st.button("🔄 Refresh", key="refresh_results"):
-                    # clear settle flag so timing doesn't re-trigger
-                    st.session_state.pop(settle_key, None)
-                    st.rerun()
-        else:
-            st.warning(f"Could not load results ({res_resp.status_code}).")
-    except Exception as e:
-        st.error(f"Could not load results: {e}")
-
     st.divider()
-    if st.button("Upload another document"):
+    st.subheader("File Status Details")
+
+    for j in jobs:
+        j_id = j["job_id"]
+        fname = j["filename"]
+        stat = j["status"]
+        icon = STATUS_ICON.get(stat, "?")
+
+        with st.expander(f"{icon} {fname} — `{stat}`", expanded=(stat == "FAILED" or total == 1)):
+            st.markdown(f"**Job ID:** `{j_id}`")
+            if stat == "FAILED":
+                st.error(f"Error: {j.get('error_message') or 'Unknown'}")
+
+            if stat in {"SUCCEEDED", "NEEDS_REVIEW"}:
+                # ── Redaction preview ─────────────────────────────────────────────────────
+                with st.expander("🔒 Redacted Preview"):
+                    try:
+                        prev_resp = api_get(f"/jobs/{j_id}/redacted-preview")
+                        if prev_resp.ok:
+                            prev = prev_resp.json()
+                            redacted_text = prev.get("redacted_text", "")
+                            st.markdown(
+                                f'<div style="background:#fafafa;border:1px solid #e0e0e0;padding:12px;'
+                                f'border-radius:8px;font-family:monospace;font-size:0.80em;'
+                                f'max-height:300px;overflow-y:auto;white-space:pre-wrap;line-height:1.6">'
+                                f'{colorize_redacted(redacted_text)}</div>',
+                                unsafe_allow_html=True,
+                            )
+                    except Exception:
+                        st.caption("Preview unavailable.")
+
+                # ── Full results ──────────────────────────────────────────────────────────
+                try:
+                    res_resp = api_get(f"/jobs/{j_id}/results")
+                    if res_resp.ok:
+                        render_results(res_resp.json(), j)
+                    else:
+                        st.info("Results are being finalized...")
+                except Exception as e:
+                    st.error(f"Could not load results: {e}")
+
+    if st.button("Start New Batch"):
+        st.session_state.pop("batch_id", None)
         st.session_state.pop("job_id", None)
         st.rerun()
 

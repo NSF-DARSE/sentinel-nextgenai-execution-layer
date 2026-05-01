@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
 from app.models import Job, JobStatus
-from app.storage import MINIO_BUCKET, ensure_bucket, get_minio_client
+from app.storage import BUCKET_NAME, ensure_bucket, get_storage_client
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -519,16 +519,12 @@ def extract_document(self, job_id: str, doc_id: str) -> None:
         log.info("job_id=%s doc_id=%s extract status=RUNNING", job_id, doc_id)
         _set_job_status(db, job, JobStatus.RUNNING)
 
-        minio = get_minio_client()
-        ensure_bucket(minio)
+        storage = get_storage_client()
+        ensure_bucket(storage)
 
         redacted_key = f"redacted/{doc_id}/redacted.txt"
-        response = minio.get_object(MINIO_BUCKET, redacted_key)
-        try:
-            redacted_text = response.read().decode("utf-8")
-        finally:
-            response.close()
-            response.release_conn()
+        data = storage.get_object(BUCKET_NAME, redacted_key)
+        redacted_text = data.read().decode("utf-8")
 
         log.info(
             "job_id=%s doc_id=%s redacted_chars=%d sending to LLM model=%s",
@@ -545,15 +541,15 @@ def extract_document(self, job_id: str, doc_id: str) -> None:
 
         extraction_bytes = json.dumps(result, ensure_ascii=False, indent=2).encode("utf-8")
         extraction_key = f"extracted/{doc_id}/extraction.json"
-        minio.put_object(
-            MINIO_BUCKET, extraction_key, io.BytesIO(extraction_bytes),
+        storage.put_object(
+            BUCKET_NAME, extraction_key, io.BytesIO(extraction_bytes),
             length=len(extraction_bytes), content_type="application/json",
         )
 
         meta_bytes = json.dumps(meta, ensure_ascii=False, indent=2).encode("utf-8")
         meta_key = f"extracted/{doc_id}/extraction_meta.json"
-        minio.put_object(
-            MINIO_BUCKET, meta_key, io.BytesIO(meta_bytes),
+        storage.put_object(
+            BUCKET_NAME, meta_key, io.BytesIO(meta_bytes),
             length=len(meta_bytes), content_type="application/json",
         )
         log.info(
@@ -565,12 +561,8 @@ def extract_document(self, job_id: str, doc_id: str) -> None:
         auth_report: dict = {}
         try:
             auth_key = f"authenticated/{doc_id}/authenticity_report.json"
-            auth_resp = minio.get_object(MINIO_BUCKET, auth_key)
-            try:
-                auth_report = json.loads(auth_resp.read().decode("utf-8"))
-            finally:
-                auth_resp.close()
-                auth_resp.release_conn()
+            data = storage.get_object(BUCKET_NAME, auth_key)
+            auth_report = json.loads(data.read().decode("utf-8"))
         except Exception:
             log.warning("job_id=%s could not fetch auth report for scoring — proceeding without it", job_id)
 
@@ -580,8 +572,8 @@ def extract_document(self, job_id: str, doc_id: str) -> None:
 
         score_bytes = json.dumps(score_result, ensure_ascii=False, indent=2).encode("utf-8")
         score_key = f"extracted/{doc_id}/score_breakdown.json"
-        minio.put_object(
-            MINIO_BUCKET, score_key, io.BytesIO(score_bytes),
+        storage.put_object(
+            BUCKET_NAME, score_key, io.BytesIO(score_bytes),
             length=len(score_bytes), content_type="application/json",
         )
         log.info(
@@ -621,21 +613,27 @@ def extract_document(self, job_id: str, doc_id: str) -> None:
         record_step("extract", time.time() - start)
         log.info("job_id=%s status=%s confidence=%s", job_id, job.status, confidence)
 
-        # Pipeline complete — delete raw PII artifacts from MinIO.
+        # Pipeline complete — delete raw PII artifacts from storage.
         # This runs regardless of SUCCEEDED vs NEEDS_REVIEW: the raw PDF and
         # unredacted text are no longer needed either way.
-        _cleanup_raw_artifacts(minio, doc_id)
+        _cleanup_raw_artifacts(storage, doc_id)
 
     except Exception as exc:
         log.exception("job_id=%s extract failed: %s", job_id, exc)
         record_step("extract", time.time() - start)
         record_step_failure("extract")
         record_job_outcome("failed")
+        is_pii_block = isinstance(exc, ValueError) and "PII scan" in str(exc)
         if isinstance(exc, ValueError) and "PII scan" in str(exc):
             record_pii_leak_block()
-        # Raw PDF and parsed text are never needed by extract (it reads only the
-        # redacted artifact). Clean up now even if we are about to retry.
-        _cleanup_or_warn(doc_id)
+        # Only clean up raw artifacts when retries are exhausted or it's a hard
+        # stop (PII block). On a transient error that will be retried (e.g. Gemini
+        # 503), the artifacts are still intact and the retry will need them if
+        # an earlier step's output is re-read (though extract only needs redacted
+        # text, clean semantics matter).
+        retries_left = self.max_retries - self.request.retries
+        if is_pii_block or retries_left <= 0:
+            _cleanup_or_warn(doc_id)
         try:
             job = db.get(Job, job_id)
             if job:
@@ -644,8 +642,13 @@ def extract_document(self, job_id: str, doc_id: str) -> None:
             pass
         # PII scan failures are hard stops — don't retry, don't risk propagation.
         # JSON parse errors and API timeouts are transient — retry those.
-        is_pii_block = isinstance(exc, ValueError) and "PII scan" in str(exc)
         if not is_pii_block:
+            raise self.retry(exc=exc)
+        raise
+    finally:
+        db.close()
+   db.close()
+  if not is_pii_block:
             raise self.retry(exc=exc)
         raise
     finally:
