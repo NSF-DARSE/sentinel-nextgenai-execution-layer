@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 
 # ── Versioning ────────────────────────────────────────────────────────────────
 PROMPT_VERSION = "v5.0-vertex"
-MODEL_NAME = "gemini-1.5-flash"
+MODEL_NAME = "publishers/google/models/gemini-1.5-flash"
 
 PROJECT_ID = os.getenv("GCP_PROJECT_ID", "bestegg-cisc867010s26")
 LOCATION = os.getenv("GCP_LOCATION", "us-central1")
