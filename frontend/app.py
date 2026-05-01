@@ -7,6 +7,7 @@ Two tabs:
   Review Queue    — see all NEEDS_REVIEW jobs, read the reason codes, approve or reject
 """
 import json
+import os
 import re
 import time
 from collections import Counter
@@ -14,10 +15,7 @@ from collections import Counter
 import requests
 import streamlit as st
 
-try:
-    API_URL = st.secrets["API_URL"]
-except (KeyError, FileNotFoundError):
-    API_URL = "http://localhost:8000"
+API_URL = os.getenv("API_URL", "http://localhost:8000")
 
 st.set_page_config(
     page_title="Sentinel",
