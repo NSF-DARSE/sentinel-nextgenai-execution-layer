@@ -32,8 +32,8 @@ alembic upgrade head
 if [ "$SENTINEL_MODE" = "worker" ]; then
     echo "Starting Worker mode..."
     # Cloud Run requires a process to listen on $PORT. 
-    # We start a tiny health-check server in the background.
-    python -c "import http.server; import socketserver; import threading; import os; PORT = int(os.getenv('PORT', '8080')); threading.Thread(target=lambda: socketserver.TCPServer(('', PORT), http.server.SimpleHTTPRequestHandler).serve_forever(), daemon=True).start(); print(f'Health check server started on port {PORT}')"
+    # Start a simple background server to satisfy the health check.
+    python3 -m http.server ${PORT:-8080} &
     exec celery -A app.worker.celery_app worker --loglevel=info
 else
     echo "Starting API mode..."

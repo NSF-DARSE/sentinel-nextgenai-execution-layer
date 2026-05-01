@@ -62,6 +62,7 @@ jobs:
             --image ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/api:${{ github.sha }} \
             --region ${{ env.REGION }} \
             --platform managed \
+            --allow-unauthenticated \
             --no-cpu-throttling \
             --memory 2Gi \
             --timeout 300 \
