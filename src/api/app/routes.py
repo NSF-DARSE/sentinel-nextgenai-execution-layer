@@ -144,6 +144,9 @@ def upload_batch(
             content_type=content_type,
         )
 
+        # Commit before enqueuing to ensure worker can find the job/doc records
+        db.commit()
+
         # Enqueue pipeline
         try:
             chain(
@@ -157,6 +160,7 @@ def upload_batch(
             job.status = JobStatus.FAILED
             job.error_message = f"Enqueue failed: {str(exc)[:200]}"
             job.updated_at = func.now()
+            db.commit()
 
         responses.append(DocumentCreateResponse(
             document_id=doc.id,
@@ -164,7 +168,6 @@ def upload_batch(
             status=job.status.value
         ))
 
-    db.commit()
     return BatchCreateResponse(batch_id=batch.id, jobs=responses)
 
 

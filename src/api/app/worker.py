@@ -135,10 +135,9 @@ def parse_document(self, job_id: str, doc_id: str, filename: str) -> None:
             job_id, doc_id, parsed_key, len(text_bytes),
         )
 
-        _set_job_status(db, job, JobStatus.SUCCEEDED)
+        log.info("job_id=%s parse step complete", job_id)
         record_step("parse", time.time() - start)
         record_job_outcome("succeeded")
-        log.info("job_id=%s status=SUCCEEDED", job_id)
 
     except Exception as exc:
         log.exception("job_id=%s parse failed: %s", job_id, exc)
@@ -254,7 +253,7 @@ def classify_document(self, job_id: str, doc_id: str) -> None:
             raise Ignore()
 
         log.info("job_id=%s doc_id=%s classified as '%s' → relevant", job_id, doc_id, category)
-        _set_job_status(db, job, JobStatus.SUCCEEDED)
+        log.info("job_id=%s classify step complete", job_id)
         record_step("classify", time.time() - start)
 
     except Exception as exc:
@@ -337,10 +336,9 @@ def authenticate_document(self, job_id: str, doc_id: str, filename: str) -> None
         job.updated_at     = func.now()
         db.commit()
 
-        _set_job_status(db, job, JobStatus.SUCCEEDED)
+        log.info("job_id=%s authenticate step complete", job_id)
         record_step("authenticate", time.time() - start)
         record_job_outcome("succeeded")
-        log.info("job_id=%s status=SUCCEEDED", job_id)
 
     except Exception as exc:
         log.exception("job_id=%s authenticate failed: %s", job_id, exc)
@@ -416,11 +414,10 @@ def redact_document(self, job_id: str, doc_id: str) -> None:
         )
         log.info("job_id=%s stored redaction report key=%s entities=%d", job_id, report_key, len(audit))
 
-        _set_job_status(db, job, JobStatus.SUCCEEDED)
+        log.info("job_id=%s redact step complete", job_id)
         record_step("redact", time.time() - start)
         record_entities(audit)
         record_job_outcome("succeeded")
-        log.info("job_id=%s status=SUCCEEDED", job_id)
 
     except Exception as exc:
         log.exception("job_id=%s redact failed: %s", job_id, exc)
@@ -439,7 +436,7 @@ def redact_document(self, job_id: str, doc_id: str) -> None:
         db.close()
 
 
-@celery_app.task(bind=True, max_retries=3, default_retry_delay=60, rate_limit="10/m")
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=60, rate_limit="100/m")
 def extract_document(self, job_id: str, doc_id: str) -> None:
     """
     LLM extraction step: fetch redacted text from storage, send to LLM,
@@ -522,14 +519,15 @@ def extract_document(self, job_id: str, doc_id: str) -> None:
         CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.80"))
 
         if confidence is None or confidence < CONFIDENCE_THRESHOLD or job.authentic is False:
-            log.warning("job_id=%s routing to NEEDS_REVIEW", job_id)
+            log.warning("job_id=%s routing to NEEDS_REVIEW (confidence=%.2f, authentic=%s)", job_id, confidence or 0.0, job.authentic)
             _set_job_status(db, job, JobStatus.NEEDS_REVIEW)
             record_job_outcome("needs_review")
         else:
-            log.info("job_id=%s status=SUCCEEDED", job_id)
+            log.info("job_id=%s status=SUCCEEDED (confidence=%.2f)", job_id, confidence)
             _set_job_status(db, job, JobStatus.SUCCEEDED)
             record_job_outcome("succeeded")
         
+        log.info("job_id=%s extract step complete - pipeline finished", job_id)
         record_step("extract", time.time() - start)
         _cleanup_raw_artifacts(storage, doc_id)
 
