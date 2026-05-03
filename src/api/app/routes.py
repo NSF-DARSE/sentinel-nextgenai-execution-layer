@@ -118,17 +118,30 @@ def upload_batch(
 
     responses = []
 
+    # Business rule: Must have bank statement AND paystub for auto-approval.
+    # Logic: track document types for the batch.
+    doc_types_seen = set()
+    for file in files:
+        # In a real app, we'd use better classification here.
+        # Simple heuristic:
+        if "bank" in file.filename.lower(): doc_types_seen.add("bank_statement")
+        elif "pay" in file.filename.lower(): doc_types_seen.add("paystub")
+    
+    requirements_met = "bank_statement" in doc_types_seen and "paystub" in doc_types_seen
+
     for file in files:
         validate_upload(file)
-        content_type = file.content_type or "application/pdf"
-
-        doc = Document(batch_id=batch.id, filename=file.filename, content_type=content_type)
-        db.add(doc)
-        db.flush()
+        # ... (rest of the loop)
 
         job = Job(document_id=doc.id, status=JobStatus.QUEUED)
+        if not requirements_met:
+            job.error_message = "Missing required documents: Need both Bank Statement and Paystub."
+            # We flag this to be reviewed by a human
+            job.status = JobStatus.NEEDS_REVIEW
+        
         db.add(job)
         db.flush()
+        # ...
 
         # Upload to storage
         raw_key = f"raw/{doc.id}/{file.filename}"

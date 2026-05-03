@@ -21,19 +21,20 @@ def render_customer():
     st.markdown("Upload your documents securely to complete your application.")
     
     uploaded_files = st.file_uploader("Upload Documents (PDF)", type=["pdf"], accept_multiple_files=True)
-    if uploaded_files and st.button("Submit"):
-        with st.spinner("Processing..."):
-            files = [("files", (f.name, f.getvalue(), "application/pdf")) for f in uploaded_files]
-            resp = requests.post(f"{API_URL}/batches/upload", files=files)
-            if resp.ok:
-                st.success("Uploaded! Your application is being reviewed.")
-                st.rerun()
-            else:
-                # Handle our new descriptive error codes
-                err = resp.json().get("detail", "Upload failed.")
-                if "GUARDRAIL_REJECTED" in err:
-                    st.error("We couldn't read your documents. Please ensure you've uploaded valid bank statements or paystubs.")
+    
+    # Simple submit button flow
+    if st.button("Submit Documents"):
+        if not uploaded_files:
+            st.warning("Please upload files first.")
+        else:
+            with st.spinner("Processing..."):
+                files = [("files", (f.name, f.getvalue(), "application/pdf")) for f in uploaded_files]
+                resp = requests.post(f"{API_URL}/batches/upload", files=files)
+                if resp.ok:
+                    st.success("Uploaded! Your application is being reviewed.")
+                    st.rerun()
                 else:
+                    err = resp.json().get("detail", "Upload failed.")
                     st.error(f"Error: {err}")
 
 # ── Officer Portal Logic ──────────────────────────────────────────────────────
