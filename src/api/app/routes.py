@@ -118,12 +118,25 @@ def upload_batch(
 
     responses = []
 
+    import hashlib
+    
+    # Track hashes to detect duplicates
+    seen_hashes = set()
+    
     # Business rule: Must have bank statement AND paystub for auto-approval.
-    # Logic: track document types for the batch.
     doc_types_seen = set()
+    
     for file in files:
-        # In a real app, we'd use better classification here.
-        # Simple heuristic:
+        # Generate hash for deduplication
+        file_content = file.file.read()
+        file.file.seek(0)
+        file_hash = hashlib.sha256(file_content).hexdigest()
+        
+        if file_hash in seen_hashes:
+            raise HTTPException(status_code=422, detail=f"Duplicate file detected: {file.filename}")
+        seen_hashes.add(file_hash)
+        
+        # Simple heuristic for type
         if "bank" in file.filename.lower(): doc_types_seen.add("bank_statement")
         elif "pay" in file.filename.lower(): doc_types_seen.add("paystub")
     

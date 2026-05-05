@@ -34,7 +34,10 @@ def render_customer():
                     st.success("Uploaded! Your application is being reviewed.")
                     st.rerun()
                 else:
-                    err = resp.json().get("detail", "Upload failed.")
+                    try:
+                        err = resp.json().get("detail", "Upload failed.")
+                    except:
+                        err = f"API error (Status {resp.status_code})"
                     st.error(f"Error: {err}")
 
 # ── Officer Portal Logic ──────────────────────────────────────────────────────
