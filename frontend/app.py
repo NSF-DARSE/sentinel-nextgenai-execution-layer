@@ -22,23 +22,27 @@ def render_customer():
     
     uploaded_files = st.file_uploader("Upload Documents (PDF)", type=["pdf"], accept_multiple_files=True)
     
-    # Simple submit button flow
-    if st.button("Submit Documents"):
-        if not uploaded_files:
-            st.warning("Please upload files first.")
-        else:
-            with st.spinner("Processing..."):
-                files = [("files", (f.name, f.getvalue(), "application/pdf")) for f in uploaded_files]
-                resp = requests.post(f"{API_URL}/batches/upload", files=files)
-                if resp.ok:
-                    st.success("Uploaded! Your application is being reviewed.")
-                    st.rerun()
-                else:
+    with st.form("upload_form"):
+        submitted = st.form_submit_button("Submit Documents")
+        
+        if submitted:
+            if not uploaded_files:
+                st.warning("Please upload files first.")
+            else:
+                with st.spinner("Processing..."):
+                    files = [("files", (f.name, f.getvalue(), "application/pdf")) for f in uploaded_files]
                     try:
-                        err = resp.json().get("detail", "Upload failed.")
-                    except:
-                        err = f"API error (Status {resp.status_code})"
-                    st.error(f"Error: {err}")
+                        resp = requests.post(f"{API_URL}/batches/upload", files=files)
+                        if resp.ok:
+                            st.success("Uploaded! Your application is being reviewed.")
+                        else:
+                            try:
+                                err = resp.json().get("detail", "Upload failed.")
+                            except:
+                                err = f"API error (Status {resp.status_code})"
+                            st.error(f"Error: {err}")
+                    except Exception as e:
+                        st.error(f"Connection Error: {e}")
 
 # ── Officer Portal Logic ──────────────────────────────────────────────────────
 def render_officer():
