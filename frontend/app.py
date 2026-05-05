@@ -51,6 +51,7 @@ def render_customer():
         batch_id = st.session_state.batch_id
         st.info(f"Tracking batch: `{batch_id}`")
         resp = requests.get(f"{API_URL}/batches/{batch_id}")
+        data = None
         if resp.ok:
             data = resp.json()
             status = data.get("status")
@@ -61,7 +62,7 @@ def render_customer():
             elif status == "SUCCEEDED":
                 st.success("✅ Application Approved!")
                 # Fetch detailed results for the first job in the batch
-                if data.get('jobs'):
+                if data and data.get('jobs'):
                     job_id = data['jobs'][0]['job_id']
                     st.divider()
                     st.subheader("📊 Application Summary")
