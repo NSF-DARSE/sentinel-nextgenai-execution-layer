@@ -34,7 +34,8 @@ def render_customer():
                     try:
                         resp = requests.post(f"{API_URL}/batches/upload", files=files)
                         if resp.ok:
-                            st.success("Uploaded! Your application is being reviewed.")
+                            st.session_state.batch_id = resp.json().get("batch_id")
+                            st.rerun()
                         else:
                             try:
                                 err = resp.json().get("detail", "Upload failed.")
@@ -43,6 +44,24 @@ def render_customer():
                             st.error(f"Error: {err}")
                     except Exception as e:
                         st.error(f"Connection Error: {e}")
+
+    # Track status if we have a batch_id
+    if "batch_id" in st.session_state:
+        batch_id = st.session_state.batch_id
+        st.info(f"Tracking batch: `{batch_id}`")
+        resp = requests.get(f"{API_URL}/batches/{batch_id}")
+        if resp.ok:
+            status = resp.json().get("status")
+            st.write(f"Current Status: **{status}**")
+            if status == "RUNNING":
+                time.sleep(2)
+                st.rerun()
+            elif status == "SUCCEEDED":
+                st.success("✅ Application Approved!")
+            elif status == "NEEDS_REVIEW":
+                st.warning("⚠️ Your application requires manual review. We will contact you.")
+        else:
+            st.error("Could not fetch status.")
 
 # ── Officer Portal Logic ──────────────────────────────────────────────────────
 def render_officer():
