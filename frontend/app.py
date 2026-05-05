@@ -52,7 +52,8 @@ def render_customer():
         st.info(f"Tracking batch: `{batch_id}`")
         resp = requests.get(f"{API_URL}/batches/{batch_id}")
         if resp.ok:
-            status = resp.json().get("status")
+            data = resp.json()
+            status = data.get("status")
             st.write(f"Current Status: **{status}**")
             if status == "RUNNING":
                 time.sleep(2)
@@ -60,7 +61,7 @@ def render_customer():
             elif status == "SUCCEEDED":
                 st.success("✅ Application Approved!")
                 # Fetch detailed results for the first job in the batch
-                if data['jobs']:
+                if data.get('jobs'):
                     job_id = data['jobs'][0]['job_id']
                     st.divider()
                     st.subheader("📊 Application Summary")
@@ -72,7 +73,7 @@ def render_customer():
                         
                         col1, col2 = st.columns(2)
                         col1.metric("Estimated Monthly Net", f"${inc.get('monthly_net_estimated', 0):,.2f}")
-                        col2.metric("Risk Profile", "Low Risk") # Placeholder for score
+                        col2.metric("Risk Profile", "Low Risk")
                         
                         st.info("🔒 All personal data (Name, SSN, Account #) was automatically redacted and encrypted.")
                     else:
