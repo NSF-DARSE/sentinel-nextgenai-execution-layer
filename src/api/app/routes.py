@@ -129,8 +129,8 @@ def upload_batch(
     for file in files:
         # Generate hash for deduplication
         file_content = file.file.read()
-        file.file.seek(0)
         file_hash = hashlib.sha256(file_content).hexdigest()
+        file.file.seek(0)
         
         if file_hash in seen_hashes:
             raise HTTPException(status_code=422, detail=f"Duplicate file detected: {file.filename}")
