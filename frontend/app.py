@@ -13,7 +13,7 @@ st.set_page_config(page_title="Sentinel", page_icon="🛡️", layout="wide")
 # ── Simple Role Switcher ──────────────────────────────────────────────────────
 # In a real app, this would be an Auth layer. For the demo, we use a sidebar.
 st.sidebar.title("Sentinel Portal")
-mode = st.sidebar.radio("Mode:", ["Customer", "Officer"])
+mode = st.sidebar.radio("Mode:", ["Customer", "Business"])
 st.sidebar.markdown("---")
 
 # ── Customer Portal Logic ─────────────────────────────────────────────────────
@@ -84,9 +84,9 @@ def render_customer():
         else:
             st.error("Could not fetch status.")
 
-# ── Officer Portal Logic ──────────────────────────────────────────────────────
-def render_officer():
-    st.title("🔍 Loan Officer Dashboard")
+# ── Business Portal Logic ──────────────────────────────────────────────────────
+def render_business():
+    st.title("🔍 Business Dashboard")
     st.markdown("Risk analysis and manual review queue.")
     
     resp = requests.get(f"{API_URL}/jobs/review")
@@ -106,4 +106,4 @@ def render_officer():
 if mode == "Customer":
     render_customer()
 else:
-    render_officer()
+    render_business()
