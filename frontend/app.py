@@ -4,6 +4,7 @@ Sentinel Unified Portal — Role-aware interface for customers and officers.
 import streamlit as st
 import os
 import requests
+import time
 
 API_URL = os.getenv("API_URL", "http://localhost:8000")
 
