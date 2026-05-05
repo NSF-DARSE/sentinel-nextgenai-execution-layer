@@ -34,8 +34,9 @@ if [ "$SENTINEL_MODE" = "worker" ]; then
     # Cloud Run requires a process to listen on $PORT. 
     # Start a simple background server to satisfy the health check.
     python3 -m http.server ${PORT:-8080} &
-    # Use --concurrency=1 to stay within memory limits (spaCy lg model is ~1GB)
-    exec celery -A app.worker.celery_app worker --loglevel=info --concurrency=1
+    # Concurrency 1 ensures we stay within 1GB+ memory footprints for LLM/spaCy models.
+    # Added --prefetch-multiplier 1 to ensure workers don't grab more tasks than they can handle.
+    exec celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 --prefetch-multiplier=1
 else
     echo "Starting API mode..."
     exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
