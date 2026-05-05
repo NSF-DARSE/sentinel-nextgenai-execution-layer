@@ -73,8 +73,10 @@ def render_customer():
                         inc = ext.get("income", {})
                         
                         col1, col2 = st.columns(2)
-                        col1.metric("Estimated Monthly Net", f"${inc.get('monthly_net_estimated', 0):,.2f}")
+                        monthly_net = inc.get('monthly_net_estimated')
+                        col1.metric("Estimated Monthly Net", f"${float(monthly_net or 0):,.2f}")
                         col2.metric("Risk Profile", "Low Risk")
+
                         
                         st.info("🔒 All personal data (Name, SSN, Account #) was automatically redacted and encrypted.")
                     else:
