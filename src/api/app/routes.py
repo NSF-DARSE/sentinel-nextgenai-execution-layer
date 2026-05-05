@@ -144,17 +144,21 @@ def upload_batch(
 
     for file in files:
         validate_upload(file)
-        # ... (rest of the loop)
+        content_type = file.content_type or "application/pdf"
 
+        # Create doc
+        doc = Document(batch_id=batch.id, filename=file.filename, content_type=content_type)
+        db.add(doc)
+        db.flush()
+
+        # Create job
         job = Job(document_id=doc.id, status=JobStatus.QUEUED)
         if not requirements_met:
             job.error_message = "Missing required documents: Need both Bank Statement and Paystub."
-            # We flag this to be reviewed by a human
             job.status = JobStatus.NEEDS_REVIEW
         
         db.add(job)
         db.flush()
-        # ...
 
         # Upload to storage
         raw_key = f"raw/{doc.id}/{file.filename}"
@@ -170,7 +174,7 @@ def upload_batch(
             content_type=content_type,
         )
 
-        # Commit before enqueuing to ensure worker can find the job/doc records
+        # Commit DB changes for this specific job before enqueuing
         db.commit()
 
         # Enqueue pipeline
@@ -183,6 +187,7 @@ def upload_batch(
                 extract_document.si(str(job.id), str(doc.id)),
             ).apply_async()
         except Exception as exc:
+            # Re-fetch or handle job update if commit occurred
             job.status = JobStatus.FAILED
             job.error_message = f"Enqueue failed: {str(exc)[:200]}"
             job.updated_at = func.now()
