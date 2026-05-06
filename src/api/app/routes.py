@@ -13,10 +13,12 @@ from app.guardrails import validate_upload
 from app.models import Batch, Document, Job, JobStatus
 from app.schemas import (
     BatchCreateResponse,
+    BatchDecisionResponse,
     BatchStatusResponse,
     DocumentCreate,
     DocumentCreateResponse,
     JobStatusResponse,
+    PerDocumentSummary,
     ReviewDecision,
     ReviewQueueItem,
     ReviewResponse,
@@ -240,6 +242,128 @@ def get_batch_status(batch_id: UUID, db: Session = Depends(get_db)):
         status=aggregate,
         jobs=job_statuses,
         created_at=batch.created_at
+    )
+
+
+@router.get("/batches/{batch_id}/decision", response_model=BatchDecisionResponse)
+def get_batch_decision(batch_id: UUID, db: Session = Depends(get_db)):
+    """
+    Application-level decision for a batch.
+
+    Per-document scores are useful for authenticity / integrity, but the
+    lending recommendation has to look at the application as a whole — the
+    paystub supplies income, the bank statement supplies risk signals, and
+    they only make sense together. This endpoint merges the per-document
+    extractions into one application profile and runs the deterministic
+    scorecard once over it.
+    """
+    from app.aggregator import (
+        merge_extractions, merge_auth_reports, completeness_signals,
+    )
+    from app.scorer import compute_score
+
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    storage = get_storage_client()
+
+    def _fetch(key: str):
+        try:
+            data = storage.get_object(BUCKET_NAME, key)
+            return json.loads(data.read().decode("utf-8"))
+        except Exception:
+            return None
+
+    extractions: list[dict] = []
+    auth_reports: list[dict] = []
+    per_document: list[PerDocumentSummary] = []
+    statuses: list[str] = []
+
+    for doc in batch.documents:
+        job = (
+            db.query(Job)
+            .filter(Job.document_id == doc.id)
+            .order_by(Job.created_at.desc())
+            .first()
+        )
+        if not job:
+            continue
+        statuses.append(job.status.value)
+
+        doc_id = str(doc.id)
+        extraction = _fetch(f"extracted/{doc_id}/extraction.json")
+        auth = _fetch(f"authenticated/{doc_id}/authenticity_report.json")
+        score_b = _fetch(f"extracted/{doc_id}/score_breakdown.json")
+
+        if extraction:
+            extractions.append(extraction)
+        if auth:
+            auth_reports.append(auth)
+
+        per_document.append(PerDocumentSummary(
+            job_id=job.id,
+            filename=doc.filename,
+            status=job.status.value,
+            document_type=(extraction or {}).get("document_type"),
+            score=(score_b or {}).get("score"),
+            flags=(score_b or {}).get("flags") or [],
+        ))
+
+    if "FAILED" in statuses:
+        agg = "FAILED"
+    elif "RUNNING" in statuses or "QUEUED" in statuses:
+        agg = "RUNNING"
+    elif "NEEDS_REVIEW" in statuses:
+        agg = "NEEDS_REVIEW"
+    elif statuses:
+        agg = "SUCCEEDED"
+    else:
+        agg = "EMPTY"
+
+    profile = merge_extractions(extractions) if extractions else None
+    combined_auth = merge_auth_reports(auth_reports) if auth_reports else None
+    combined_score = None
+
+    if profile and combined_auth:
+        combined_score = compute_score(profile, combined_auth)
+        # Annotate the breakdown with which document supplied the income figure
+        # and which document set was received — both are part of the audit trail.
+        income_source = profile.get("income_source_document")
+        if income_source:
+            combined_score.setdefault("breakdown", []).insert(0, {
+                "code": "INCOME_SOURCE",
+                "category": "provenance",
+                "points_earned": 0,
+                "points_possible": 0,
+                "severity": "none",
+                "detail": f"Income figure sourced from {income_source}",
+            })
+        completeness = completeness_signals(profile)
+        for code in completeness:
+            severity = "none" if code == "DOC_SET_COMPLETE" else "medium"
+            combined_score.setdefault("breakdown", []).insert(0, {
+                "code": code,
+                "category": "completeness",
+                "points_earned": 0,
+                "points_possible": 0,
+                "severity": severity,
+                "detail": (
+                    "Both income and bank-statement evidence provided"
+                    if code == "DOC_SET_COMPLETE"
+                    else "Document set is incomplete for full underwriting"
+                ),
+            })
+            if code != "DOC_SET_COMPLETE":
+                combined_score.setdefault("flags", []).append(code)
+
+    return BatchDecisionResponse(
+        batch_id=batch.id,
+        status=agg,
+        application_profile=profile,
+        combined_score=combined_score,
+        combined_authenticity=combined_auth,
+        per_document=per_document,
     )
 
 

@@ -60,3 +60,21 @@ class ReviewResponse(BaseModel):
     job_id: UUID
     status: str
     review_status: str
+
+
+class PerDocumentSummary(BaseModel):
+    job_id: UUID
+    filename: str
+    status: str
+    document_type: str | None = None
+    score: float | None = None
+    flags: list[str] = []
+
+
+class BatchDecisionResponse(BaseModel):
+    batch_id: UUID
+    status: str
+    application_profile: dict | None = None
+    combined_score: dict | None = None
+    combined_authenticity: dict | None = None
+    per_document: list[PerDocumentSummary] = []

@@ -108,8 +108,116 @@ def _render_decision_card(job: dict, results: dict):
         )
 
 
+def _fetch_decision(batch_id: str) -> dict | None:
+    """Fetch the application-level combined decision for a batch."""
+    try:
+        r = requests.get(f"{API_URL}/batches/{batch_id}/decision", timeout=10)
+        return r.json() if r.ok else None
+    except Exception:
+        return None
+
+
+def _render_application_decision(decision: dict):
+    """Top-level customer card: the application as a whole, not per document."""
+    profile = decision.get("application_profile") or {}
+    combined = decision.get("combined_score") or {}
+    auth = decision.get("combined_authenticity") or {}
+
+    score = combined.get("score")
+    threshold = float(combined.get("threshold") or 0.80)
+    earned = combined.get("total_earned", 0)
+    possible = combined.get("total_possible", 0)
+    recommendation = combined.get("recommendation", "—")
+    breakdown = combined.get("breakdown") or []
+    flags = combined.get("flags") or []
+
+    income = (profile.get("income") or {}).get("monthly_net_estimated")
+    income_source = profile.get("income_source_document")
+    received = profile.get("documents_received") or []
+
+    band = _risk_band(score, threshold)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric(
+        "Application Score",
+        f"{int(round((score or 0) * 100))} / 100",
+        help=f"Approval threshold {int(threshold * 100)} / 100. "
+             f"Earned {earned} of {possible} possible points across all documents.",
+    )
+    c2.metric("Risk Band", band)
+    c3.metric(
+        "Verified Monthly Net",
+        f"${float(income or 0):,.2f}" if income is not None else "Not extracted",
+        help=f"Sourced from {income_source}" if income_source else None,
+    )
+
+    if received:
+        st.caption("📂 Documents received: " + ", ".join(sorted(set(received))))
+
+    with st.container(border=True):
+        st.markdown(
+            "**How this decision was made.** "
+            "An AI model extracted structured fields from each document "
+            "(income, balances, transaction signals). Those fields were then "
+            "merged into a single **application profile** — for example, the "
+            "paystub supplies the income figure and the bank statement supplies "
+            "the risk signals. A **deterministic 100-point scorecard** turned "
+            "the merged profile into one recommendation. Every point added or "
+            "deducted has a reason code below. The AI did not make the lending "
+            "decision."
+        )
+
+    if recommendation == "NEEDS_REVIEW":
+        st.markdown("**Why your application is being reviewed**")
+        findings = [
+            b for b in breakdown
+            if b.get("severity") in ("medium", "high", "critical")
+            or (b.get("points_earned", 0) < b.get("points_possible", 0))
+        ]
+        if findings:
+            _render_score_breakdown(findings, only_findings=False)
+        else:
+            st.caption("Routine review — no specific risk findings recorded.")
+        if flags:
+            st.caption("Reason codes: " + ", ".join(flags))
+        st.info(
+            "Under federal law (ECOA / Reg B), if this review results in an "
+            "adverse decision you will receive a written notice listing the "
+            "specific reason codes above."
+        )
+    else:
+        with st.expander("See the full application scorecard"):
+            _render_score_breakdown(breakdown, only_findings=False)
+
+
+def _render_per_document_section(decision: dict):
+    """Per-document quality cards — supporting evidence under the main decision."""
+    per_doc = decision.get("per_document") or []
+    if not per_doc:
+        return
+
+    with st.expander("Per-document analysis (authenticity + integrity per file)"):
+        for doc in per_doc:
+            score = doc.get("score")
+            score_label = (
+                f"{int(round(score * 100))}/100" if score is not None else "n/a"
+            )
+            st.markdown(
+                f"**{doc.get('filename')}** — {doc.get('document_type') or 'unknown'} "
+                f"&nbsp;·&nbsp; {score_label} &nbsp;·&nbsp; status `{doc.get('status')}`"
+            )
+            results = _fetch_results(doc["job_id"])
+            if not results:
+                st.caption("Per-document scorecard not yet available.")
+                continue
+            score_data = results.get("score_breakdown") or {}
+            _render_score_breakdown(
+                score_data.get("breakdown") or [], only_findings=True
+            )
+
+
 def _render_customer_summary(data: dict):
-    """Render the full customer summary based on the batch status response."""
+    """Render the customer-facing summary based on the batch status response."""
     status = data.get("status")
     jobs = data.get("jobs") or []
 
@@ -128,50 +236,15 @@ def _render_customer_summary(data: dict):
     if not jobs:
         return
 
-    # Aggregate the worst recommendation across documents — that drives the message
     st.divider()
-    st.subheader("📊 Application Summary")
+    st.subheader("📊 Application Decision")
 
-    for idx, job in enumerate(jobs):
-        if idx > 0:
-            st.markdown("---")
-        results = _fetch_results(job["job_id"])
-        if not results:
-            st.caption(
-                f"Detailed analysis for **{job.get('filename', 'document')}** "
-                f"is still being prepared."
-            )
-            continue
-
-        _render_decision_card(job, results)
-
-        score_data = results.get("score_breakdown") or {}
-        breakdown = score_data.get("breakdown") or []
-        flags = score_data.get("flags") or []
-        recommendation = score_data.get("recommendation")
-
-        # Reasons section — what's defensible to a regulator
-        if recommendation == "NEEDS_REVIEW" or job.get("status") == "NEEDS_REVIEW":
-            st.markdown("**Why your application is being reviewed**")
-            findings = [
-                b for b in breakdown
-                if b.get("severity") in ("medium", "high", "critical")
-                or (b.get("points_earned", 0) < b.get("points_possible", 0))
-            ]
-            if findings:
-                _render_score_breakdown(findings, only_findings=False)
-            else:
-                st.caption("Routine review — no specific risk findings recorded.")
-            if flags:
-                st.caption("Reason codes: " + ", ".join(flags))
-            st.info(
-                "Under federal law (ECOA / Reg B), if this review results in an "
-                "adverse decision you will receive a written notice listing the "
-                "specific reason codes above."
-            )
-        else:
-            with st.expander("See the full scorecard for this document"):
-                _render_score_breakdown(breakdown, only_findings=False)
+    decision = _fetch_decision(st.session_state.get("batch_id", ""))
+    if decision and decision.get("combined_score"):
+        _render_application_decision(decision)
+        _render_per_document_section(decision)
+    else:
+        st.caption("Combined application decision is still being prepared.")
 
     st.info(
         "🔒 All personal data (Name, SSN, Account #) was redacted before any "
