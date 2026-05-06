@@ -98,10 +98,10 @@ def _render_decision_card(job: dict, results: dict):
 
     with st.container(border=True):
         st.markdown(
-            "**Your decision in plain English.** "
-            "We pulled the key figures from this document and ran them through "
-            "a 100-point scorecard. The reasons below show where each point "
-            "came from."
+            "**Document Analysis.** "
+            "Key data points from this document were extracted and evaluated against "
+            "a 100-point risk assessment scorecard. The breakdown below details the "
+            "scoring for this specific document."
         )
 
 
@@ -153,11 +153,12 @@ def _render_application_decision(decision: dict):
 
     with st.container(border=True):
         st.markdown(
-            "**Your decision in plain English.** "
-            "We pulled the key figures from your documents — income from your "
-            "paystub, balances and transaction signals from your bank "
-            "statement — and ran them through a 100-point scorecard. "
-            "The reasons below show where each point came from."
+            "**Decision Analysis.** "
+            "This summary is based on key financial indicators extracted from your "
+            "submitted documents, including income verification and bank statement "
+            "analysis. These factors were evaluated against a 100-point risk "
+            "assessment scorecard. The breakdown below details the scoring for "
+            "each category."
         )
 
     if recommendation == "NEEDS_REVIEW":
@@ -240,9 +241,10 @@ def _render_customer_summary(data: dict):
         st.caption("Combined application decision is still being prepared.")
 
     st.info(
-        "🔒 All personal data (Name, SSN, Account #) was redacted before any "
-        "AI model saw the document. The redacted text is the only thing sent "
-        "to the LLM."
+        "🔒 **Data Privacy.** Sensitive personal identifiers (such as Name, SSN, "
+        "and Account Numbers) are automatically redacted prior to analysis. "
+        "Only the anonymized document content is evaluated by our secure risk "
+        "assessment engine, ensuring your private information remains protected."
     )
 
 
