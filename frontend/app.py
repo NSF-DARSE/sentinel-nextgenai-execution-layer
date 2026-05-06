@@ -96,15 +96,12 @@ def _render_decision_card(job: dict, results: dict):
         f"&nbsp;·&nbsp; Recommendation: **{recommendation}**"
     )
 
-    # Decision provenance — the part the user asked for
     with st.container(border=True):
         st.markdown(
-            "**How this decision was made.** "
-            "An AI model extracted structured fields from your document (income, "
-            "balances, transaction signals). A **deterministic 100-point scorecard** "
-            "then turned those fields into a recommendation using fixed rules and "
-            "weights — every point added or deducted has a reason code below. "
-            "The AI did not make the lending decision."
+            "**Your decision in plain English.** "
+            "We pulled the key figures from this document and ran them through "
+            "a 100-point scorecard. The reasons below show where each point "
+            "came from."
         )
 
 
@@ -156,15 +153,11 @@ def _render_application_decision(decision: dict):
 
     with st.container(border=True):
         st.markdown(
-            "**How this decision was made.** "
-            "An AI model extracted structured fields from each document "
-            "(income, balances, transaction signals). Those fields were then "
-            "merged into a single **application profile** — for example, the "
-            "paystub supplies the income figure and the bank statement supplies "
-            "the risk signals. A **deterministic 100-point scorecard** turned "
-            "the merged profile into one recommendation. Every point added or "
-            "deducted has a reason code below. The AI did not make the lending "
-            "decision."
+            "**Your decision in plain English.** "
+            "We pulled the key figures from your documents — income from your "
+            "paystub, balances and transaction signals from your bank "
+            "statement — and ran them through a 100-point scorecard. "
+            "The reasons below show where each point came from."
         )
 
     if recommendation == "NEEDS_REVIEW":
