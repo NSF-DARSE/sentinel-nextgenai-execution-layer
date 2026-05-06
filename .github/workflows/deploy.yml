@@ -64,6 +64,9 @@ jobs:
             --platform managed \
             --allow-unauthenticated \
             --no-cpu-throttling \
+            --min-instances 1 \
+            --max-instances 3 \
+            --cpu 2 \
             --memory 2Gi \
             --timeout 300 \
             --vpc-connector sentinel-vpc-conn \
