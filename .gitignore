@@ -24,6 +24,9 @@ redacted_ssn.txt
 .DS_Store
 **/.DS_Store
 
+# Office app lock files (PowerPoint / Word transient artifacts)
+~$*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
