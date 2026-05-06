@@ -103,7 +103,7 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
                 "notes": {
                     "type": "string",
                     "nullable": True,
-                    "description": "Free-text explanation of any flags raised, or null if none."
+                    "description": "Free-text explanation of any flags raised, or null if none. Use professional prose with proper spacing between words and sentences."
                 }
             },
             "required": [

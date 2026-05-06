@@ -161,8 +161,18 @@ def _render_application_decision(decision: dict):
             "each category."
         )
 
-    if recommendation == "NEEDS_REVIEW":
-        st.markdown("**Why your application is being reviewed**")
+    status = st.session_state.get("last_status")
+
+    if recommendation == "NEEDS_REVIEW" or (status == "SUCCEEDED" and breakdown):
+        if status == "SUCCEEDED":
+            st.markdown("**Manual Review Findings**")
+            st.caption(
+                "This application was flagged for manual review based on the findings "
+                "below, but has since been approved by a loan officer."
+            )
+        else:
+            st.markdown("**Why your application is being reviewed**")
+        
         findings = [
             b for b in breakdown
             if b.get("severity") in ("medium", "high", "critical")
@@ -213,6 +223,7 @@ def _render_per_document_section(decision: dict):
 def _render_customer_summary(data: dict):
     """Render the customer-facing summary based on the batch status response."""
     status = data.get("status")
+    st.session_state.last_status = status
     jobs = data.get("jobs") or []
 
     if status == "SUCCEEDED":
