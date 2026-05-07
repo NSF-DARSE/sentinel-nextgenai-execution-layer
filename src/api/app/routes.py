@@ -179,7 +179,18 @@ def upload_batch(
         # Commit DB changes for this specific job before enqueuing
         db.commit()
 
-        # Enqueue pipeline
+        # Skip the pipeline entirely when the application is missing required
+        # documents — the job stays in NEEDS_REVIEW so an officer can chase the
+        # customer for the missing piece. Running parse/classify/extract on an
+        # incomplete set would just clobber NEEDS_REVIEW back to SUCCEEDED.
+        if not requirements_met:
+            responses.append(DocumentCreateResponse(
+                document_id=doc.id,
+                job_id=job.id,
+                status=job.status.value
+            ))
+            continue
+
         try:
             chain(
                 parse_document.s(str(job.id), str(doc.id), file.filename),
@@ -189,7 +200,6 @@ def upload_batch(
                 extract_document.si(str(job.id), str(doc.id)),
             ).apply_async()
         except Exception as exc:
-            # Re-fetch or handle job update if commit occurred
             job.status = JobStatus.FAILED
             job.error_message = f"Enqueue failed: {str(exc)[:200]}"
             job.updated_at = func.now()

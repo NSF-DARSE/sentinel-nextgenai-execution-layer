@@ -37,13 +37,19 @@ if resp.ok:
         st.success("No documents pending review.")
     for item in queue:
         job_id = str(item["job_id"])
-        with st.expander(f"📄 {item['filename']} — Score: {item.get('confidence_score', 'N/A')}"):
-            st.write(f"Job ID: {job_id}")
-            
-            if st.button("Approve", key=f"app_{job_id}"):
+        score = item.get("confidence_score")
+        score_label = f"Score: {score:.2f}" if isinstance(score, (int, float)) else "Score: N/A"
+        reason = item.get("error_message") or "Below confidence threshold"
+
+        with st.expander(f"📄 {item['filename']} — {score_label}"):
+            st.markdown(f"**Reason flagged:** {reason}")
+            st.caption(f"Job ID: `{job_id}`")
+
+            cols = st.columns(2)
+            if cols[0].button("Approve", key=f"app_{job_id}"):
                 api_post(f"/jobs/{job_id}/review", json={"decision": "approved"})
                 st.rerun()
-            if st.button("Reject", key=f"rej_{job_id}"):
+            if cols[1].button("Reject", key=f"rej_{job_id}"):
                 api_post(f"/jobs/{job_id}/review", json={"decision": "rejected"})
                 st.rerun()
 else:
