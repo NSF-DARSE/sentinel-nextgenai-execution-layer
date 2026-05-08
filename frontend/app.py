@@ -230,7 +230,7 @@ def _render_customer_summary(data: dict):
         st.success("✅ Application Approved")
     elif status == "NEEDS_REVIEW":
         st.warning(
-            "⏳ Application Pending Review — a Best Egg specialist will look at "
+            "⏳ Application Pending Review — a loan officer will look at "
             "the items below and follow up with you."
         )
     elif status == "FAILED":
@@ -261,8 +261,13 @@ def _render_customer_summary(data: dict):
 
 # ── Customer Portal Logic ─────────────────────────────────────────────────────
 def render_customer():
-    st.title("🛡️ Best Egg — Loan Portal")
-    st.markdown("Upload your documents securely to complete your application.")
+    st.title("🛡️ Sentinel Demo")
+    st.caption(
+        "Demonstration of the Sentinel document-intelligence pipeline. "
+        "In production this layer is embedded inside a lender's existing "
+        "application flow — it is not a standalone portal."
+    )
+    st.markdown("Upload financial documents (bank statements, paystubs, W-2s) to see the pipeline in action.")
 
     uploaded_files = st.file_uploader(
         "Upload Documents (PDF)", type=["pdf"], accept_multiple_files=True

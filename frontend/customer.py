@@ -9,13 +9,18 @@ import time
 API_URL = os.getenv("API_URL", "http://localhost:8000")
 
 st.set_page_config(
-    page_title="Sentinel Customer Portal",
+    page_title="Sentinel Demo",
     page_icon="📄",
     layout="wide",
 )
 
-st.title("🛡️ Best Egg — Document Submission")
-st.markdown("Securely upload your financial documents to complete your loan application.")
+st.title("🛡️ Sentinel Demo")
+st.caption(
+    "Demonstration of the Sentinel document-intelligence pipeline. "
+    "In production this layer is embedded inside a lender's existing application "
+    "flow — it is not a standalone portal."
+)
+st.markdown("Upload financial documents (bank statements, paystubs, W-2s) to see the pipeline in action.")
 
 # ── API helpers ───────────────────────────────────────────────────────────────
 def api_post(path: str, **kwargs):
