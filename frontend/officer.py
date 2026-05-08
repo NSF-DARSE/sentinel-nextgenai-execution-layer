@@ -24,7 +24,52 @@ def api_get(path: str):
 def api_post(path: str, **kwargs):
     return requests.post(f"{API_URL}{path}", timeout=30, **kwargs)
 
-# ── UI ────────────────────────────────────────────────────────────────────────
+
+def _fmt_pct(v):
+    return f"{v * 100:.1f}%" if isinstance(v, (int, float)) else "—"
+
+
+def _fmt_score(v):
+    return f"{v:.2f}" if isinstance(v, (int, float)) else "—"
+
+
+# ── Metrics strip ─────────────────────────────────────────────────────────────
+metrics_resp = api_get("/metrics/dashboard")
+if metrics_resp.ok:
+    m = metrics_resp.json()
+    totals = m["totals"]
+    rates = m["rates"]
+    statuses = m["status_counts"]
+
+    row1 = st.columns(4)
+    row1[0].metric("Documents (24h)", totals["processed_24h"])
+    row1[1].metric("All-time processed", totals["all_jobs"])
+    row1[2].metric("PII entities redacted", totals["pii_entities_redacted"])
+    row1[3].metric("Pending review", statuses.get("NEEDS_REVIEW", 0))
+
+    row2 = st.columns(4)
+    row2[0].metric("Auto-approval rate", _fmt_pct(rates["auto_approval_rate"]))
+    row2[1].metric("Auth pass rate", _fmt_pct(rates["auth_pass_rate"]))
+    row2[2].metric("Avg confidence", _fmt_score(rates["avg_confidence"]))
+    row2[3].metric("Avg auth confidence", _fmt_score(rates["avg_auth_confidence"]))
+
+    chart_data = {
+        "Status": ["Succeeded", "Needs review", "Failed", "Running", "Queued"],
+        "Count": [
+            statuses.get("SUCCEEDED", 0),
+            statuses.get("NEEDS_REVIEW", 0),
+            statuses.get("FAILED", 0),
+            statuses.get("RUNNING", 0),
+            statuses.get("QUEUED", 0),
+        ],
+    }
+    st.bar_chart(chart_data, x="Status", y="Count", height=220)
+else:
+    st.warning("Could not load dashboard metrics.")
+
+st.divider()
+
+# ── Review queue ──────────────────────────────────────────────────────────────
 st.header("Pending Human Reviews")
 
 if st.button("Refresh Queue"):

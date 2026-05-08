@@ -15,7 +15,7 @@ from vertexai.generative_models import GenerativeModel, GenerationConfig
 log = logging.getLogger(__name__)
 
 # ── Versioning ────────────────────────────────────────────────────────────────
-PROMPT_VERSION = "v5.0-vertex"
+PROMPT_VERSION = "v5.1-vertex"
 MODEL_NAME = "gemini-2.5-flash"
 
 PROJECT_ID = os.getenv("GCP_PROJECT_ID", "bestegg-cisc867010s26")
@@ -69,9 +69,17 @@ _RESPONSE_SCHEMA: dict[str, Any] = {
             "properties": {
                 "opening_balance": {"type": "number", "nullable": True},
                 "closing_balance": {"type": "number", "nullable": True},
-                "average_daily_balance_estimated": {"type": "number", "nullable": True}
+                "average_daily_balance_estimated": {"type": "number", "nullable": True},
+                "statement_period_months": {
+                    "type": "integer",
+                    "nullable": True,
+                    "description": "Number of distinct calendar months the bank statement covers. Null for non-bank-statement types."
+                }
             },
-            "required": ["opening_balance", "closing_balance", "average_daily_balance_estimated"]
+            "required": [
+                "opening_balance", "closing_balance",
+                "average_daily_balance_estimated", "statement_period_months"
+            ]
         },
         "risk_flags": {
             "type": "object",
@@ -157,6 +165,9 @@ INCOME EXTRACTION:
 - tax_return: annual_gross = AGI; monthly_net_estimated = annual_gross / 12; frequency = "annual".
 
 ACCOUNT SUMMARY: populate for bank_statement only; set all fields to null for other types.
+For bank_statement, set statement_period_months to the number of distinct calendar months
+the statement covers (e.g., a statement labeled "Mar 1 – May 31" covers 3 months; a single
+month statement is 1). Count from the statement period header, not from transaction dates.
 
 RISK FLAGS for non-bank-statement types: set all count/boolean flags to 0/false — they are not observable from this document.
 

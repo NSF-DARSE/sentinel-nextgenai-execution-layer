@@ -81,6 +81,35 @@ def _set_job_status(
     db.commit()
 
 
+_REVIEW_FLAG_MESSAGES = {
+    "INSUFFICIENT_HISTORY": "Bank statement covers fewer months than required for underwriting",
+    "INTEGRITY_FAIL": "Document failed integrity checks (math or self-contradictions)",
+    "AUTH_FAILED": "Document failed authenticity verification",
+    "DOC_TYPE_UNKNOWN": "Document type could not be classified",
+    "INCOME_MISSING": "Monthly income could not be extracted",
+    "INCOME_ZERO": "Income reported as $0 — manual verification needed",
+    "BALANCE_DATA_MISSING": "Bank statement missing opening or closing balance",
+    "NSF_FEES_HIGH": "Elevated NSF fee activity",
+    "OVERDRAFTS_HIGH": "Elevated overdraft activity",
+    "GAMBLING_TRANSACTIONS": "Gambling transactions detected",
+    "LOW_FIELD_COVERAGE": "Many required fields could not be extracted",
+}
+
+
+def _summarize_review_reason(
+    flags: list[str], confidence: float | None, authentic: bool | None,
+) -> str:
+    """One-line human-readable reason for routing a job to NEEDS_REVIEW."""
+    for flag in flags:
+        if flag in _REVIEW_FLAG_MESSAGES:
+            return _REVIEW_FLAG_MESSAGES[flag]
+    if authentic is False:
+        return "Document failed authenticity verification"
+    if confidence is not None:
+        return f"Confidence {confidence:.2f} below threshold"
+    return "Confidence score unavailable"
+
+
 @celery_app.task(bind=True, max_retries=0)
 def parse_document(self, job_id: str, doc_id: str, filename: str) -> None:
     """
@@ -511,16 +540,29 @@ def extract_document(self, job_id: str, doc_id: str) -> None:
         )
 
         confidence = score_result["score"]
+        recommendation = score_result.get("recommendation")
+        score_flags = score_result.get("flags") or []
         from sqlalchemy import func as sqlfunc2
         job.confidence_score = confidence
         job.updated_at       = sqlfunc2.now()
         db.commit()
 
-        CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.80"))
+        # Trust the scorer's recommendation — it already accounts for hard-stops
+        # like INSUFFICIENT_HISTORY where confidence may still be high but the
+        # application can't be auto-approved.
+        needs_review = (
+            recommendation == "NEEDS_REVIEW"
+            or confidence is None
+            or job.authentic is False
+        )
 
-        if confidence is None or confidence < CONFIDENCE_THRESHOLD or job.authentic is False:
-            log.warning("job_id=%s routing to NEEDS_REVIEW (confidence=%.2f, authentic=%s)", job_id, confidence or 0.0, job.authentic)
-            _set_job_status(db, job, JobStatus.NEEDS_REVIEW)
+        if needs_review:
+            reason = _summarize_review_reason(score_flags, confidence, job.authentic)
+            log.warning(
+                "job_id=%s routing to NEEDS_REVIEW (confidence=%s, flags=%s)",
+                job_id, confidence, score_flags,
+            )
+            _set_job_status(db, job, JobStatus.NEEDS_REVIEW, error_message=reason)
             record_job_outcome("needs_review")
         else:
             log.info("job_id=%s status=SUCCEEDED (confidence=%.2f)", job_id, confidence)

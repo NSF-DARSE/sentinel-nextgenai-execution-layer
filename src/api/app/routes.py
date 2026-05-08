@@ -377,6 +377,68 @@ def get_batch_decision(batch_id: UUID, db: Session = Depends(get_db)):
     )
 
 
+@router.get("/metrics/dashboard")
+def dashboard_metrics(db: Session = Depends(get_db)):
+    """
+    Aggregate metrics for the officer dashboard. Built from the jobs table —
+    no Prometheus dependency, so the demo UI can render without scraping.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    status_counts: dict[str, int] = {s.value: 0 for s in JobStatus}
+    rows = (
+        db.query(Job.status, func.count(Job.id))
+        .group_by(Job.status)
+        .all()
+    )
+    for status, count in rows:
+        status_counts[status.value] = int(count)
+
+    total_jobs = sum(status_counts.values())
+    terminal = (
+        status_counts["SUCCEEDED"]
+        + status_counts["FAILED"]
+        + status_counts["NEEDS_REVIEW"]
+    )
+
+    pii_total = db.query(func.coalesce(func.sum(Job.entity_count), 0)).scalar() or 0
+    avg_confidence = db.query(func.avg(Job.confidence_score)).scalar()
+    avg_auth_confidence = db.query(func.avg(Job.auth_confidence)).scalar()
+
+    auth_pass = db.query(func.count(Job.id)).filter(Job.authentic.is_(True)).scalar() or 0
+    auth_total = db.query(func.count(Job.id)).filter(Job.authentic.isnot(None)).scalar() or 0
+    auth_pass_rate = (auth_pass / auth_total) if auth_total else None
+
+    auto_approved = (
+        db.query(func.count(Job.id))
+        .filter(Job.status == JobStatus.SUCCEEDED, Job.review_status.is_(None))
+        .scalar() or 0
+    )
+    auto_approval_rate = (auto_approved / terminal) if terminal else None
+
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    processed_24h = (
+        db.query(func.count(Job.id))
+        .filter(Job.created_at >= since)
+        .scalar() or 0
+    )
+
+    return {
+        "totals": {
+            "all_jobs": total_jobs,
+            "processed_24h": int(processed_24h),
+            "pii_entities_redacted": int(pii_total),
+        },
+        "status_counts": status_counts,
+        "rates": {
+            "auto_approval_rate": auto_approval_rate,
+            "auth_pass_rate": auth_pass_rate,
+            "avg_confidence": float(avg_confidence) if avg_confidence is not None else None,
+            "avg_auth_confidence": float(avg_auth_confidence) if avg_auth_confidence is not None else None,
+        },
+    }
+
+
 @router.get("/jobs/review", response_model=list[ReviewQueueItem])
 def list_review_queue(db: Session = Depends(get_db)):
     """Return all jobs currently sitting in NEEDS_REVIEW, with their metadata."""

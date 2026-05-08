@@ -27,6 +27,7 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.80"))
+MIN_BANK_STATEMENT_MONTHS = int(os.getenv("MIN_BANK_STATEMENT_MONTHS", "3"))
 
 SEVERITY_RANK = {"none": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 
@@ -121,6 +122,31 @@ def compute_score(extraction: dict[str, Any], auth_report: dict[str, Any]) -> di
             f"Balance data not applicable for {doc_type}",
         ))
         total_earned += 10
+
+    # 1d. Statement history depth — bank statements only.
+    # Industry minimum for unsecured personal lending is ~3 months. A shorter
+    # window is informational, not fraud, so we route to human review rather
+    # than auto-fail — an officer can ask the customer for more months.
+    if doc_type == "bank_statement":
+        months = account.get("statement_period_months")
+        if months is None:
+            breakdown.append(_check(
+                "HISTORY_DEPTH_UNKNOWN", "completeness", 0, 0, "medium",
+                "Statement period could not be determined from document",
+            ))
+            flags.append("INSUFFICIENT_HISTORY")
+        elif months < MIN_BANK_STATEMENT_MONTHS:
+            breakdown.append(_check(
+                "INSUFFICIENT_HISTORY", "completeness", 0, 0, "high",
+                f"Bank statement covers {months} month(s); "
+                f"{MIN_BANK_STATEMENT_MONTHS} months required for underwriting",
+            ))
+            flags.append("INSUFFICIENT_HISTORY")
+        else:
+            breakdown.append(_check(
+                "HISTORY_DEPTH_OK", "completeness", 0, 0, "none",
+                f"Bank statement covers {months} months — meets minimum",
+            ))
 
     # ── Layer 2: Integrity & Authentication (25 pts) ──────────────────────────
 
@@ -290,7 +316,9 @@ def compute_score(extraction: dict[str, Any], auth_report: dict[str, Any]) -> di
 
     # Hard stops: integrity failure or auth failure always trigger review
     # regardless of numeric score — a 0.95 with a forged document is still fraud.
-    hard_stop = any(f in flags for f in ("INTEGRITY_FAIL", "AUTH_FAILED", "DOC_TYPE_UNKNOWN"))
+    hard_stop = any(f in flags for f in (
+        "INTEGRITY_FAIL", "AUTH_FAILED", "DOC_TYPE_UNKNOWN", "INSUFFICIENT_HISTORY",
+    ))
     recommendation = "NEEDS_REVIEW" if (score < THRESHOLD or hard_stop) else "PASS"
 
     log.info(
