@@ -423,6 +423,68 @@ def dashboard_metrics(db: Session = Depends(get_db)):
         .scalar() or 0
     )
 
+    # ── Volume over time (last 14 days) ──────────────────────────────────────
+    fourteen_days_ago = datetime.now(timezone.utc) - timedelta(days=14)
+    daily_rows = (
+        db.query(
+            func.date(Job.created_at).label("day"),
+            func.count(Job.id).label("count"),
+        )
+        .filter(Job.created_at >= fourteen_days_ago)
+        .group_by(func.date(Job.created_at))
+        .order_by(func.date(Job.created_at))
+        .all()
+    )
+    volume_over_time = [
+        {"day": str(row.day), "count": int(row.count)} for row in daily_rows
+    ]
+
+    # ── Document type mix ────────────────────────────────────────────────────
+    doc_type_rows = (
+        db.query(Job.document_type, func.count(Job.id))
+        .filter(Job.document_type.isnot(None))
+        .group_by(Job.document_type)
+        .all()
+    )
+    document_type_mix = [
+        {"document_type": dt, "count": int(c)} for dt, c in doc_type_rows
+    ]
+
+    # ── Confidence score distribution (buckets of 0.10) ──────────────────────
+    bucket_labels = [
+        "0.0–0.1", "0.1–0.2", "0.2–0.3", "0.3–0.4", "0.4–0.5",
+        "0.5–0.6", "0.6–0.7", "0.7–0.8", "0.8–0.9", "0.9–1.0",
+    ]
+    confidence_buckets = {label: 0 for label in bucket_labels}
+    scores = (
+        db.query(Job.confidence_score)
+        .filter(Job.confidence_score.isnot(None))
+        .all()
+    )
+    for (score,) in scores:
+        idx = min(int(score * 10), 9)
+        confidence_buckets[bucket_labels[idx]] += 1
+    confidence_distribution = [
+        {"bucket": k, "count": v} for k, v in confidence_buckets.items()
+    ]
+
+    # ── Top PII types redacted (split the comma-separated string) ────────────
+    pii_type_counts: dict[str, int] = {}
+    pii_rows = (
+        db.query(Job.pii_types_found)
+        .filter(Job.pii_types_found.isnot(None))
+        .all()
+    )
+    for (types_str,) in pii_rows:
+        for t in types_str.split(","):
+            t = t.strip()
+            if t:
+                pii_type_counts[t] = pii_type_counts.get(t, 0) + 1
+    pii_types = [
+        {"pii_type": k, "count": v}
+        for k, v in sorted(pii_type_counts.items(), key=lambda kv: kv[1], reverse=True)
+    ]
+
     return {
         "totals": {
             "all_jobs": total_jobs,
@@ -435,6 +497,12 @@ def dashboard_metrics(db: Session = Depends(get_db)):
             "auth_pass_rate": auth_pass_rate,
             "avg_confidence": float(avg_confidence) if avg_confidence is not None else None,
             "avg_auth_confidence": float(avg_auth_confidence) if avg_auth_confidence is not None else None,
+        },
+        "charts": {
+            "volume_over_time": volume_over_time,
+            "document_type_mix": document_type_mix,
+            "confidence_distribution": confidence_distribution,
+            "pii_types": pii_types,
         },
     }
 

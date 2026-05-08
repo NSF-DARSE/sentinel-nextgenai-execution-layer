@@ -63,7 +63,58 @@ if metrics_resp.ok:
             statuses.get("QUEUED", 0),
         ],
     }
+    st.markdown("##### Job status distribution")
     st.bar_chart(chart_data, x="Status", y="Count", height=220)
+
+    charts = m.get("charts") or {}
+
+    # Row 1: volume over time + document type mix
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("##### Documents processed (last 14 days)")
+        vot = charts.get("volume_over_time") or []
+        if vot:
+            st.line_chart({
+                "Day": [r["day"] for r in vot],
+                "Documents": [r["count"] for r in vot],
+            }, x="Day", y="Documents", height=240)
+        else:
+            st.caption("No documents processed in the last 14 days.")
+
+    with c2:
+        st.markdown("##### Document type mix")
+        dtm = charts.get("document_type_mix") or []
+        if dtm:
+            st.bar_chart({
+                "Type": [r["document_type"] for r in dtm],
+                "Count": [r["count"] for r in dtm],
+            }, x="Type", y="Count", height=240)
+        else:
+            st.caption("No classified documents yet.")
+
+    # Row 2: confidence distribution + top PII types
+    c3, c4 = st.columns(2)
+    with c3:
+        st.markdown("##### Confidence score distribution")
+        cd = charts.get("confidence_distribution") or []
+        if cd and any(r["count"] for r in cd):
+            st.bar_chart({
+                "Bucket": [r["bucket"] for r in cd],
+                "Documents": [r["count"] for r in cd],
+            }, x="Bucket", y="Documents", height=240)
+        else:
+            st.caption("No scored documents yet.")
+
+    with c4:
+        st.markdown("##### Top PII types redacted")
+        pii = (charts.get("pii_types") or [])[:8]
+        if pii:
+            st.bar_chart({
+                "PII Type": [r["pii_type"] for r in pii],
+                "Documents": [r["count"] for r in pii],
+            }, x="PII Type", y="Documents", height=240)
+        else:
+            st.caption("No PII redactions recorded yet.")
 else:
     st.warning("Could not load dashboard metrics.")
 
