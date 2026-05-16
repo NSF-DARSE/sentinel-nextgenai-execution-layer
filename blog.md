@@ -117,3 +117,5 @@ Instead, we used **GitHub Actions secrets** to handle the deployment and **Googl
 ## The Finish Line
 
 Building this was a huge learning curve. The Minimum Viable Product (MVP) is on par and is performing as expected. It could be more refined by having rulesets and criteria like how many files do we accept for proof of income? Is it just paystubs or bank statements too? Do we need W2 forms? Having clear criteria helps us build a policy first, which we can then use in our software to evaluate our customers and build that mutual trust and grow in business.
+
+Feel free to run the demo, test it and play around: https://sentinel-frontend-1041799394320.us-central1.run.app/
