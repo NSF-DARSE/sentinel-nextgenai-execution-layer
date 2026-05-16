@@ -2,13 +2,13 @@
 
 Everything these days is being automated, and the tendency to solve everything with AI has been increasing every day. One question remains: How do we protect privacy? 
 
-The project we have been working on—Sentinel—is focused on how banks automate the loan and credit approval procedure. Normally, when you apply for something like an American Express card, you fill out an online form with details like your SSN and income information, and sometimes upload paystubs or bank statements. You instantly get a decision with an offer, and then you decide whether to accept it or not.
+The project we have been working on Sentinel and it is focused on how banks automate the loan and credit approval procedure. Normally, when you apply for something like an American Express card, you fill out an online form with details like your SSN and income information, and sometimes upload paystubs or bank statements. You instantly get a decision with an offer, and then you decide whether to accept it or not.
 
 In the fintech world, this entire process happens through automation. The current trend is to use Large Language Models (LLMs), but the problem is that you are providing sensitive information to the LLM when you call the API. The LLM sees your private information to make the approval decision. 
 
-We often hear about sensitive info leaking, but how does it actually leak? Personal data is at risk whenever you use standard API calls. Big tech companies are constant targets for malicious attacks, and that's when your data can get stolen. Furthermore, LLMs often store data to train and improve, so when you send sensitive information, it gets stored—at least within the context.
+We often hear about sensitive info leaking, but how does it actually leak? Personal data is at risk whenever you use standard API calls. Big tech companies are constant targets for malicious attacks, and that's when your data can get stolen. Furthermore, LLMs often store data to train and improve, so when you send sensitive information, it gets stored, at least within the context.
 
-This is where Sentinel comes in. It acts as a shield—a layer that filters out personal information and acts as an orchestrator. It ensures the AI only receives exactly what it needs to know to evaluate an applicant. I will walk you through exactly how this works.
+This is where Sentinel comes in. It acts as a shield, a layer that filters out personal information and acts as an orchestrator. It ensures the AI only receives exactly what it needs to know to evaluate an applicant. I will walk you through exactly how this works.
 
 ## The Three Pillars: Scalability, Resilience, and Security
 
@@ -18,14 +18,14 @@ To build a system like this, we kept three core pillars in mind:
 Can we scale this idea to a large user base? Do we have the necessary resources? Most importantly, can we guarantee that all personal data is handled securely before it ever reaches the LLM? For us, scalability isn't just about handling more users; it's about scaling our privacy promise alongside our processing power.
 
 ### 2. Resilience
-Will the system recover if there is a potential leak or an operational error? We focused on setting up guardrails to ensure the pipeline is healthy at every step of the way. We also integrated deep observability—monitoring PII detection rates, files processed, and the time taken for each stage of the pipeline. This level of monitoring ensures the system is resilient and reliable.
+Will the system recover if there is a potential leak or an operational error? We focused on setting up guardrails to ensure the pipeline is healthy at every step of the way. We also integrated deep observability monitoring PII detection rates, files processed, and the time taken for each stage of the pipeline. This level of monitoring ensures the system is resilient and reliable.
 
 ### 3. Security
 How do we ensure the entire process is truly secure? We practiced strict data minimization and backed our code with rigorous testing, from unit tests to smoke tests. We looked closely at the raw input files entering the system and strictly controlled exactly what the LLM is allowed to see. This is the heart of our security architecture.
 
 ## The Engine Room: How It All Runs So Fast
 
-Before we look at the document journey, you might wonder—how does this system handle hundreds of people at once without crashing? 
+Before we look at the document journey, you might wonder how does this system handle hundreds of people at once without crashing? 
 
 Think about Instagram. When you double-tap a photo to "like" it, it feels instant, right? But in the background, a lot is happening. Instagram uses things like **Redis** and **Celery** to handle all those likes. 
 
@@ -33,7 +33,7 @@ In our project, Redis is like the "waiting room" or the queue. When you upload y
 
 ## The Architecture: The Big Picture
 
-Here’s how all those pieces—the frontend, the queue, and the workers—actually talk to each other. It looks like a lot, but it’s really just a relay race where each part does its job and passes the baton to the next.
+Here’s how all those pieces the frontend, the queue, and the workers actually talk to each other. It looks like a lot, but it’s really just a relay race where each part does its job and passes the baton to the next.
 
 ```mermaid
 graph TD
@@ -94,7 +94,7 @@ Let me walk you through the actual journey of a document. It’s a 4-phase proce
 First, we ingest the raw data. But before we do anything, we have "guardrails" to check: Is this even a financial document? Is it legit? If it’s not, we just reject it right there. This saves us from wasting resources on parsing, redacting, or making expensive LLM API calls. We authenticate first so we only process what matters.
 
 ### Phase 2: The Privacy Guard
-This is where we use spaCy and Presidio (Microsoft’s open-source SDK). These are NLP engines that find PII through text vectorization. Now, you might think—wait, if we’re using Microsoft’s stuff, isn't the data at risk? Actually, no. We aren't making API calls to them. We install the SDK and libraries locally. It's our own instance, no internet involved. 
+This is where we use spaCy and Presidio (Microsoft’s open source SDK). These are NLP engines that find PII through text vectorization. Now, you might think wait, if we’re using Microsoft’s stuff, isn't the data at risk? Actually, no. We aren't making API calls to them. We install the SDK and libraries locally. It's our own instance, no internet involved. 
 
 We set up spaCy to do the heavy lifting, and just in case it misses something, Presidio acts like a second scan or an inspection. It’s fast, efficient, and proves that we can solve the privacy problem with the right setup.
 
@@ -112,8 +112,8 @@ Moving this whole thing from my laptop to Google Cloud was a big step. You know 
 
 One of the most important things was handling our API keys. These keys are like the password to our Gemini AI, so they’re super sensitive. We couldn't just leave them sitting in the code where anyone could see them. 
 
-Instead, we used **GitHub Actions secrets** to handle the deployment and **Google Secret Manager** to store the keys in a high-tech digital vault. This means the actual keys are never in our source code. When the system starts up in the cloud, it "requests" the keys it needs on the fly. We also set it up so that each part of our system only has permission to see the specific keys it needs to do its job—nothing more. This way, the information is only accessed when it's absolutely necessary, and it stays protected in its vault otherwise.
+Instead, we used **GitHub Actions secrets** to handle the deployment and **Google Secret Manager** to store the keys in a high-tech digital vault. This means the actual keys are never in our source code. When the system starts up in the cloud, it "requests" the keys it needs on the fly. We also set it up so that each part of our system only has permission to see the specific keys it needs to do its job nothing more. This way, the information is only accessed when it's absolutely necessary, and it stays protected in its vault otherwise.
 
 ## The Finish Line
 
-Building this was a huge learning curve. The Minimum Viable Product (MVP) is on par and is performing as expected. It could be more refined by having rulesets and criteria—like how many files do we accept for proof of income? Is it just paystubs or bank statements too? Do we need W2 forms? Having clear criteria helps us build a policy first, which we can then use in our software to evaluate our customers and build that mutual trust and grow in business.
+Building this was a huge learning curve. The Minimum Viable Product (MVP) is on par and is performing as expected. It could be more refined by having rulesets and criteria like how many files do we accept for proof of income? Is it just paystubs or bank statements too? Do we need W2 forms? Having clear criteria helps us build a policy first, which we can then use in our software to evaluate our customers and build that mutual trust and grow in business.
