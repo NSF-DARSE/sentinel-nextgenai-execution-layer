@@ -39,11 +39,13 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://sentinel:sentinel@postgres:5432/sentinel
       REDIS_URL: redis://redis:6379/0
+      USE_GCS: "false"
+      STORAGE_BUCKET: sentinel
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: sentinel
       MINIO_SECRET_KEY: sentinel123
       MINIO_BUCKET: sentinel
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
 
   worker:
     build:
@@ -56,11 +58,13 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://sentinel:sentinel@postgres:5432/sentinel
       REDIS_URL: redis://redis:6379/0
+      USE_GCS: "false"
+      STORAGE_BUCKET: sentinel
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: sentinel
       MINIO_SECRET_KEY: sentinel123
       MINIO_BUCKET: sentinel
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
 
   prometheus:
     image: prom/prometheus:v2.49.0

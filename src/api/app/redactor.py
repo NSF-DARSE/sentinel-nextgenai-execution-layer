@@ -7,18 +7,7 @@ from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer, Recogn
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 
-# spaCy model loaded once — used as an independent second-pass detector.
-# Presidio already uses spaCy internally, but only surfaces hits it's confident
-# about.  Running spaCy directly and merging results (the "ensemble") catches
-# names that Presidio drops — especially in short transaction lines where
-# surrounding context is sparse.
-try:
-    _nlp = spacy.load("en_core_web_lg")
-except OSError:
-    _nlp = None  # Graceful degradation: ensemble disabled if model not present.
-
 # Entity types this pipeline detects and redacts.
-# DATE_TIME intentionally excluded — transaction dates are not PII.
 _ENTITIES: List[str] = [
     "PERSON",
     "LOCATION",
@@ -184,6 +173,13 @@ def _build_analyzer() -> AnalyzerEngine:
 _analyzer = _build_analyzer()
 _anonymizer = AnonymizerEngine()
 
+# Use the already-loaded spaCy model from Presidio for our ensemble pass.
+# This saves ~1GB of RAM per worker process in Cloud Run.
+try:
+    _nlp = _analyzer.nlp_engine.nlp["en"]
+except Exception:
+    _nlp = None
+
 # One replace operator per entity type so each placeholder is clearly typed.
 _OPERATORS: dict[str, OperatorConfig] = {
     entity: OperatorConfig("replace", {"new_value": f"[{entity}]"})
@@ -261,12 +257,15 @@ def redact_text(text: str) -> Tuple[str, List[dict]]:
     # Tag each audit entry with which detector caught it.
     presidio_spans = {(r.start, r.end) for r in presidio_results}
 
+    # original_value is intentionally excluded — storing the raw PII text in the
+    # audit trail would defeat the purpose of redaction (data minimization).
+    # start/end offsets plus entity_type are sufficient for audit purposes.
     audit: List[dict] = [
         {
             "entity_type": r.entity_type,
             "start": r.start,
             "end": r.end,
-            "original_value": text[r.start: r.end],
+            "char_count": r.end - r.start,
             "detector": "presidio" if (r.start, r.end) in presidio_spans else "spacy_ensemble",
         }
         for r in sorted(results, key=lambda r: r.start)

@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
 from app.models import Job, JobStatus
-from app.storage import MINIO_BUCKET, ensure_bucket, get_minio_client
+from app.storage import BUCKET_NAME, ensure_bucket, get_storage_client
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -23,6 +23,51 @@ celery_app = Celery("sentinel", broker=REDIS_URL, backend=REDIS_URL)
 celery_app.conf.task_serializer = "json"
 celery_app.conf.result_serializer = "json"
 celery_app.conf.accept_content = ["json"]
+
+
+def _cleanup_raw_artifacts(storage, doc_id: str) -> None:
+    """
+    Delete PII-containing artifacts from storage once the full pipeline is complete.
+
+    Keeps (all PII-free): redacted text, redaction report, authenticity report,
+    extraction JSON, extraction meta.
+    Deletes: raw/{doc_id}/* and parsed/{doc_id}/extracted.txt
+    """
+    log = logging.getLogger(__name__)
+    keys_to_delete = []
+
+    # Collect all raw objects (handles any filename variation)
+    try:
+        for obj in storage.list_objects(BUCKET_NAME, prefix=f"raw/{doc_id}/"):
+            keys_to_delete.append(obj.object_name)
+    except Exception:
+        log.warning("doc_id=%s could not list raw/ objects for cleanup", doc_id)
+
+    # Unredacted parsed text
+    keys_to_delete.append(f"parsed/{doc_id}/extracted.txt")
+
+    if not keys_to_delete:
+        log.info("doc_id=%s no raw artifacts to clean up", doc_id)
+        return
+
+    try:
+        storage.remove_objects(BUCKET_NAME, keys_to_delete)
+        log.info("doc_id=%s cleaned up %d raw artifact(s)", doc_id, len(keys_to_delete))
+    except Exception as err:
+        log.warning("doc_id=%s cleanup error: %s", doc_id, err)
+
+
+def _cleanup_or_warn(doc_id: str) -> None:
+    """
+    Best-effort cleanup of PII-containing raw artifacts on failure paths.
+    """
+    log = logging.getLogger(__name__)
+    try:
+        storage = get_storage_client()
+        ensure_bucket(storage)
+        _cleanup_raw_artifacts(storage, doc_id)
+    except Exception:
+        log.warning("doc_id=%s best-effort cleanup failed on error path", doc_id)
 
 
 def _set_job_status(
@@ -36,11 +81,40 @@ def _set_job_status(
     db.commit()
 
 
+_REVIEW_FLAG_MESSAGES = {
+    "INSUFFICIENT_HISTORY": "Bank statement covers fewer months than required for underwriting",
+    "INTEGRITY_FAIL": "Document failed integrity checks (math or self-contradictions)",
+    "AUTH_FAILED": "Document failed authenticity verification",
+    "DOC_TYPE_UNKNOWN": "Document type could not be classified",
+    "INCOME_MISSING": "Monthly income could not be extracted",
+    "INCOME_ZERO": "Income reported as $0 — manual verification needed",
+    "BALANCE_DATA_MISSING": "Bank statement missing opening or closing balance",
+    "NSF_FEES_HIGH": "Elevated NSF fee activity",
+    "OVERDRAFTS_HIGH": "Elevated overdraft activity",
+    "GAMBLING_TRANSACTIONS": "Gambling transactions detected",
+    "LOW_FIELD_COVERAGE": "Many required fields could not be extracted",
+}
+
+
+def _summarize_review_reason(
+    flags: list[str], confidence: float | None, authentic: bool | None,
+) -> str:
+    """One-line human-readable reason for routing a job to NEEDS_REVIEW."""
+    for flag in flags:
+        if flag in _REVIEW_FLAG_MESSAGES:
+            return _REVIEW_FLAG_MESSAGES[flag]
+    if authentic is False:
+        return "Document failed authenticity verification"
+    if confidence is not None:
+        return f"Confidence {confidence:.2f} below threshold"
+    return "Confidence score unavailable"
+
+
 @celery_app.task(bind=True, max_retries=0)
 def parse_document(self, job_id: str, doc_id: str, filename: str) -> None:
     """
-    Parse step: fetch raw PDF from MinIO, extract text with pdfplumber,
-    store extracted text back to MinIO as parsed/{doc_id}/extracted.txt.
+    Parse step: fetch raw PDF from storage, extract text with pdfplumber,
+    store extracted text back to storage as parsed/{doc_id}/extracted.txt.
     Idempotent: safe to re-run, will overwrite previous output.
     """
     from app.metrics import record_step, record_step_failure, record_job_outcome
@@ -58,18 +132,14 @@ def parse_document(self, job_id: str, doc_id: str, filename: str) -> None:
         log.info("job_id=%s doc_id=%s status=RUNNING", job_id, doc_id)
         _set_job_status(db, job, JobStatus.RUNNING)
 
-        minio = get_minio_client()
-        ensure_bucket(minio)
+        storage = get_storage_client()
+        ensure_bucket(storage)
 
         raw_key = f"raw/{doc_id}/{filename}"
         log.info("job_id=%s fetching object key=%s", job_id, raw_key)
 
-        response = minio.get_object(MINIO_BUCKET, raw_key)
-        try:
-            pdf_bytes = response.read()
-        finally:
-            response.close()
-            response.release_conn()
+        data = storage.get_object(BUCKET_NAME, raw_key)
+        pdf_bytes = data.read()
 
         pages: list[str] = []
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
@@ -85,8 +155,8 @@ def parse_document(self, job_id: str, doc_id: str, filename: str) -> None:
         text_bytes = extracted_text.encode("utf-8")
 
         parsed_key = f"parsed/{doc_id}/extracted.txt"
-        minio.put_object(
-            MINIO_BUCKET, parsed_key, io.BytesIO(text_bytes),
+        storage.put_object(
+            BUCKET_NAME, parsed_key, io.BytesIO(text_bytes),
             length=len(text_bytes), content_type="text/plain",
         )
         log.info(
@@ -94,20 +164,139 @@ def parse_document(self, job_id: str, doc_id: str, filename: str) -> None:
             job_id, doc_id, parsed_key, len(text_bytes),
         )
 
-        _set_job_status(db, job, JobStatus.SUCCEEDED)
+        log.info("job_id=%s parse step complete", job_id)
         record_step("parse", time.time() - start)
         record_job_outcome("succeeded")
-        log.info("job_id=%s status=SUCCEEDED", job_id)
 
     except Exception as exc:
         log.exception("job_id=%s parse failed: %s", job_id, exc)
         record_step("parse", time.time() - start)
         record_step_failure("parse")
         record_job_outcome("failed")
+        _cleanup_or_warn(doc_id)
         try:
             job = db.get(Job, job_id)
             if job:
-                _set_job_status(db, job, JobStatus.FAILED, error_message=str(exc)[:1024])
+                _set_job_status(db, job, JobStatus.FAILED, error_message=f"[parse] {exc}"[:1024])
+        except Exception:
+            pass
+        raise
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Keyword sets for relevance classification.
+# A document must match at least _MIN_MATCHES keywords from a single category
+# to be considered a financial document. Uses case-insensitive substring search.
+# ---------------------------------------------------------------------------
+_FINANCIAL_KEYWORDS: dict[str, list[str]] = {
+    "bank_statement": [
+        "account balance", "checking account", "savings account",
+        "available balance", "statement period", "beginning balance", "ending balance",
+        "withdrawal", "routing number", "overdraft", "direct deposit",
+        "account number", "daily balance",
+    ],
+    "paystub": [
+        "gross pay", "net pay", "pay period", "pay date",
+        "year to date", "ytd", "federal income tax",
+        "social security", "medicare", "deductions", "hours worked",
+        "earnings statement", "pay stub", "payroll",
+    ],
+    "w2": [
+        "form w-2", "wages, tips", "federal income tax withheld",
+        "social security wages", "medicare wages", "employer identification",
+        "wage and tax statement",
+    ],
+    "tax_return": [
+        "form 1040", "adjusted gross income", "taxable income",
+        "filing status", "standard deduction", "tax refund",
+        "schedule a", "schedule b", "schedule c", "form 1099",
+    ],
+}
+_MIN_MATCHES = 2
+
+
+def _classify_text(text: str) -> tuple[bool, str]:
+    """
+    Returns (is_financial, category_label).
+    Checks each financial category; a document is accepted if it matches
+    at least _MIN_MATCHES keywords from any single category.
+    Returns the best-matching category name, or "unknown" if none qualifies.
+    """
+    lower = text.lower()
+    best_category = "unknown"
+    best_count = 0
+    for category, keywords in _FINANCIAL_KEYWORDS.items():
+        count = sum(1 for kw in keywords if kw in lower)
+        if count > best_count:
+            best_count = count
+            best_category = category
+    is_financial = best_count >= _MIN_MATCHES
+    return is_financial, best_category if is_financial else "unknown"
+
+
+@celery_app.task(bind=True, max_retries=0)
+def classify_document(self, job_id: str, doc_id: str) -> None:
+    """
+    Relevance gate: fetch parsed/{doc_id}/extracted.txt from storage and run a
+    keyword-based classifier to confirm this is a financial document.
+    """
+    from celery.exceptions import Ignore
+    from app.metrics import record_step, record_step_failure, record_classify_rejection
+
+    log = logging.getLogger(__name__)
+    start = time.time()
+
+    db: Session = SessionLocal()
+    try:
+        job = db.get(Job, job_id)
+        if job is None:
+            log.error("job_id=%s not found in DB", job_id)
+            return
+
+        log.info("job_id=%s doc_id=%s classify status=RUNNING", job_id, doc_id)
+        _set_job_status(db, job, JobStatus.RUNNING)
+
+        storage = get_storage_client()
+        ensure_bucket(storage)
+
+        parsed_key = f"parsed/{doc_id}/extracted.txt"
+        data = storage.get_object(BUCKET_NAME, parsed_key)
+        parsed_text = data.read().decode("utf-8")
+
+        is_financial, category = _classify_text(parsed_text)
+
+        if not is_financial:
+            msg = (
+                f"[classify] Document is not a financial statement: "
+                f"classified as '{category}'. "
+                f"Upload a bank statement, paystub, W-2, or tax return."
+            )
+            log.warning("job_id=%s doc_id=%s %s", job_id, doc_id, msg)
+            _set_job_status(db, job, JobStatus.FAILED, error_message=msg[:1024])
+            record_step("classify", time.time() - start)
+            record_step_failure("classify")
+            record_classify_rejection()
+            _cleanup_or_warn(doc_id)
+            raise Ignore()
+
+        log.info("job_id=%s doc_id=%s classified as '%s' → relevant", job_id, doc_id, category)
+        log.info("job_id=%s classify step complete", job_id)
+        record_step("classify", time.time() - start)
+
+    except Exception as exc:
+        from celery.exceptions import Ignore as _Ignore
+        if isinstance(exc, _Ignore):
+            raise
+        log.exception("job_id=%s classify failed: %s", job_id, exc)
+        record_step("classify", time.time() - start)
+        record_step_failure("classify")
+        _cleanup_or_warn(doc_id)
+        try:
+            job = db.get(Job, job_id)
+            if job:
+                _set_job_status(db, job, JobStatus.FAILED, error_message=f"[classify] {exc}"[:1024])
         except Exception:
             pass
         raise
@@ -118,13 +307,8 @@ def parse_document(self, job_id: str, doc_id: str, filename: str) -> None:
 @celery_app.task(bind=True, max_retries=0)
 def authenticate_document(self, job_id: str, doc_id: str, filename: str) -> None:
     """
-    Authenticate step: fetch raw PDF + parsed text from MinIO, run deterministic
-    authenticity checks (document type, balance math, PDF metadata), store result as
-    authenticated/{doc_id}/authenticity_report.json.
-
-    Runs after parse, before redact. Never blocks the pipeline — flags issues
-    in the report and lets the downstream approval process decide.
-    Idempotent: overwrites previous output on re-run.
+    Authenticate step: fetch raw PDF + parsed text from storage, run deterministic
+    authenticity checks, store result as authenticated/{doc_id}/authenticity_report.json.
     """
     from app.authenticator import authenticate_document as run_checks
     from app.metrics import record_step, record_step_failure, record_job_outcome
@@ -142,26 +326,18 @@ def authenticate_document(self, job_id: str, doc_id: str, filename: str) -> None
         log.info("job_id=%s doc_id=%s authenticate status=RUNNING", job_id, doc_id)
         _set_job_status(db, job, JobStatus.RUNNING)
 
-        minio = get_minio_client()
-        ensure_bucket(minio)
+        storage = get_storage_client()
+        ensure_bucket(storage)
 
         # Fetch raw PDF bytes for metadata inspection
         raw_key = f"raw/{doc_id}/{filename}"
-        response = minio.get_object(MINIO_BUCKET, raw_key)
-        try:
-            pdf_bytes = response.read()
-        finally:
-            response.close()
-            response.release_conn()
+        data = storage.get_object(BUCKET_NAME, raw_key)
+        pdf_bytes = data.read()
 
         # Fetch parsed text for content checks
         parsed_key = f"parsed/{doc_id}/extracted.txt"
-        response = minio.get_object(MINIO_BUCKET, parsed_key)
-        try:
-            parsed_text = response.read().decode("utf-8")
-        finally:
-            response.close()
-            response.release_conn()
+        data = storage.get_object(BUCKET_NAME, parsed_key)
+        parsed_text = data.read().decode("utf-8")
 
         report = run_checks(parsed_text, pdf_bytes)
 
@@ -176,13 +352,12 @@ def authenticate_document(self, job_id: str, doc_id: str, filename: str) -> None
 
         report_bytes = json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8")
         report_key = f"authenticated/{doc_id}/authenticity_report.json"
-        minio.put_object(
-            MINIO_BUCKET, report_key, io.BytesIO(report_bytes),
+        storage.put_object(
+            BUCKET_NAME, report_key, io.BytesIO(report_bytes),
             length=len(report_bytes), content_type="application/json",
         )
         log.info("job_id=%s stored authenticity report key=%s", job_id, report_key)
 
-        # Quality checkpoint: persist authentication results to Postgres
         from sqlalchemy import func
         job.document_type  = report["document_type"]
         job.authentic      = report["authentic"]
@@ -190,20 +365,20 @@ def authenticate_document(self, job_id: str, doc_id: str, filename: str) -> None
         job.updated_at     = func.now()
         db.commit()
 
-        _set_job_status(db, job, JobStatus.SUCCEEDED)
+        log.info("job_id=%s authenticate step complete", job_id)
         record_step("authenticate", time.time() - start)
         record_job_outcome("succeeded")
-        log.info("job_id=%s status=SUCCEEDED", job_id)
 
     except Exception as exc:
         log.exception("job_id=%s authenticate failed: %s", job_id, exc)
         record_step("authenticate", time.time() - start)
         record_step_failure("authenticate")
         record_job_outcome("failed")
+        _cleanup_or_warn(doc_id)
         try:
             job = db.get(Job, job_id)
             if job:
-                _set_job_status(db, job, JobStatus.FAILED, error_message=str(exc)[:1024])
+                _set_job_status(db, job, JobStatus.FAILED, error_message=f"[authenticate] {exc}"[:1024])
         except Exception:
             pass
         raise
@@ -214,13 +389,8 @@ def authenticate_document(self, job_id: str, doc_id: str, filename: str) -> None
 @celery_app.task(bind=True, max_retries=0)
 def redact_document(self, job_id: str, doc_id: str) -> None:
     """
-    Redact step: fetch parsed/{doc_id}/extracted.txt from MinIO, run PII
-    detection and replacement via redact_text(), then store:
-      - redacted/{doc_id}/redacted.txt        – scrubbed text
-      - redacted/{doc_id}/redaction_report.json – audit trail
-
-    Idempotent: overwrites previous output on re-run.
-    The original parsed/{doc_id}/extracted.txt is never modified.
+    Redact step: fetch parsed/{doc_id}/extracted.txt from storage, run PII
+    detection and replacement.
     """
     from collections import Counter
     from app.redactor import redact_text
@@ -239,16 +409,12 @@ def redact_document(self, job_id: str, doc_id: str) -> None:
         log.info("job_id=%s doc_id=%s redact status=RUNNING", job_id, doc_id)
         _set_job_status(db, job, JobStatus.RUNNING)
 
-        minio = get_minio_client()
-        ensure_bucket(minio)
+        storage = get_storage_client()
+        ensure_bucket(storage)
 
         parsed_key = f"parsed/{doc_id}/extracted.txt"
-        response = minio.get_object(MINIO_BUCKET, parsed_key)
-        try:
-            raw_text = response.read().decode("utf-8")
-        finally:
-            response.close()
-            response.release_conn()
+        data = storage.get_object(BUCKET_NAME, parsed_key)
+        raw_text = data.read().decode("utf-8")
 
         redacted_text, audit = redact_text(raw_text)
 
@@ -256,7 +422,6 @@ def redact_document(self, job_id: str, doc_id: str) -> None:
         counts_str = " ".join(f"{k}={v}" for k, v in sorted(counts.items()))
         log.info("job_id=%s found %s", job_id, counts_str or "no PII")
 
-        # Quality checkpoint: persist redaction results to Postgres
         from sqlalchemy import func as sqlfunc
         job.entity_count    = len(audit)
         job.pii_types_found = ",".join(sorted(counts.keys())) or None
@@ -265,34 +430,34 @@ def redact_document(self, job_id: str, doc_id: str) -> None:
 
         redacted_bytes = redacted_text.encode("utf-8")
         redacted_key = f"redacted/{doc_id}/redacted.txt"
-        minio.put_object(
-            MINIO_BUCKET, redacted_key, io.BytesIO(redacted_bytes),
+        storage.put_object(
+            BUCKET_NAME, redacted_key, io.BytesIO(redacted_bytes),
             length=len(redacted_bytes), content_type="text/plain",
         )
 
         report_bytes = json.dumps(audit, ensure_ascii=False, indent=2).encode("utf-8")
         report_key = f"redacted/{doc_id}/redaction_report.json"
-        minio.put_object(
-            MINIO_BUCKET, report_key, io.BytesIO(report_bytes),
+        storage.put_object(
+            BUCKET_NAME, report_key, io.BytesIO(report_bytes),
             length=len(report_bytes), content_type="application/json",
         )
         log.info("job_id=%s stored redaction report key=%s entities=%d", job_id, report_key, len(audit))
 
-        _set_job_status(db, job, JobStatus.SUCCEEDED)
+        log.info("job_id=%s redact step complete", job_id)
         record_step("redact", time.time() - start)
         record_entities(audit)
         record_job_outcome("succeeded")
-        log.info("job_id=%s status=SUCCEEDED", job_id)
 
     except Exception as exc:
         log.exception("job_id=%s redact failed: %s", job_id, exc)
         record_step("redact", time.time() - start)
         record_step_failure("redact")
         record_job_outcome("failed")
+        _cleanup_or_warn(doc_id)
         try:
             job = db.get(Job, job_id)
             if job:
-                _set_job_status(db, job, JobStatus.FAILED, error_message=str(exc)[:1024])
+                _set_job_status(db, job, JobStatus.FAILED, error_message=f"[redact] {exc}"[:1024])
         except Exception:
             pass
         raise
@@ -300,20 +465,13 @@ def redact_document(self, job_id: str, doc_id: str) -> None:
         db.close()
 
 
-@celery_app.task(bind=True, max_retries=3, default_retry_delay=60, rate_limit="10/m")
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=60, rate_limit="100/m")
 def extract_document(self, job_id: str, doc_id: str) -> None:
     """
-    LLM extraction step: fetch redacted/{doc_id}/redacted.txt from MinIO,
-    send to Gemini via extractor.extract_from_redacted(), scan output for
-    PII leaks, then store:
-      - extracted/{doc_id}/extraction.json        – structured risk profile
-      - extracted/{doc_id}/extraction_meta.json   – model/prompt versioning + token usage
-
-    Guarantee: the LLM only ever receives the redacted text artifact.
-    The raw PDF and parsed text are never touched by this task.
-    Idempotent: overwrites previous output on re-run.
+    LLM extraction step: fetch redacted text from storage, send to LLM,
+    score result, and route to review if needed.
     """
-    from app.extractor import extract_from_redacted, PROMPT_VERSION, MODEL
+    from app.extractor import extract_from_redacted, PROMPT_VERSION, MODEL_NAME
     from app.metrics import record_step, record_step_failure, record_job_outcome, record_pii_leak_block
 
     log = logging.getLogger(__name__)
@@ -329,86 +487,112 @@ def extract_document(self, job_id: str, doc_id: str) -> None:
         log.info("job_id=%s doc_id=%s extract status=RUNNING", job_id, doc_id)
         _set_job_status(db, job, JobStatus.RUNNING)
 
-        minio = get_minio_client()
-        ensure_bucket(minio)
+        storage = get_storage_client()
+        ensure_bucket(storage)
 
         redacted_key = f"redacted/{doc_id}/redacted.txt"
-        response = minio.get_object(MINIO_BUCKET, redacted_key)
-        try:
-            redacted_text = response.read().decode("utf-8")
-        finally:
-            response.close()
-            response.release_conn()
+        data = storage.get_object(BUCKET_NAME, redacted_key)
+        redacted_text = data.read().decode("utf-8")
 
         log.info(
             "job_id=%s doc_id=%s redacted_chars=%d sending to LLM model=%s",
-            job_id, doc_id, len(redacted_text), MODEL,
+            job_id, doc_id, len(redacted_text), MODEL_NAME,
         )
 
         result = extract_from_redacted(redacted_text)
 
         meta = result.pop("_meta", {})
         meta["prompt_version"] = PROMPT_VERSION
-        meta["model"] = MODEL
+        meta["model"] = MODEL_NAME
         meta["doc_id"] = doc_id
         meta["job_id"] = job_id
 
         extraction_bytes = json.dumps(result, ensure_ascii=False, indent=2).encode("utf-8")
         extraction_key = f"extracted/{doc_id}/extraction.json"
-        minio.put_object(
-            MINIO_BUCKET, extraction_key, io.BytesIO(extraction_bytes),
+        storage.put_object(
+            BUCKET_NAME, extraction_key, io.BytesIO(extraction_bytes),
             length=len(extraction_bytes), content_type="application/json",
         )
 
         meta_bytes = json.dumps(meta, ensure_ascii=False, indent=2).encode("utf-8")
         meta_key = f"extracted/{doc_id}/extraction_meta.json"
-        minio.put_object(
-            MINIO_BUCKET, meta_key, io.BytesIO(meta_bytes),
+        storage.put_object(
+            BUCKET_NAME, meta_key, io.BytesIO(meta_bytes),
             length=len(meta_bytes), content_type="application/json",
         )
-        log.info(
-            "job_id=%s stored extraction meta key=%s input_tokens=%s output_tokens=%s",
-            job_id, meta_key, meta.get("input_tokens"), meta.get("output_tokens"),
+
+        auth_report: dict = {}
+        try:
+            auth_key = f"authenticated/{doc_id}/authenticity_report.json"
+            data = storage.get_object(BUCKET_NAME, auth_key)
+            auth_report = json.loads(data.read().decode("utf-8"))
+        except Exception:
+            log.warning("job_id=%s could not fetch auth report for scoring", job_id)
+
+        from app.scorer import compute_score
+        score_result = compute_score(result, auth_report)
+
+        score_bytes = json.dumps(score_result, ensure_ascii=False, indent=2).encode("utf-8")
+        score_key = f"extracted/{doc_id}/score_breakdown.json"
+        storage.put_object(
+            BUCKET_NAME, score_key, io.BytesIO(score_bytes),
+            length=len(score_bytes), content_type="application/json",
         )
 
-        # Quality checkpoint: persist confidence score to Postgres
-        confidence = result.get("confidence_score")
+        confidence = score_result["score"]
+        recommendation = score_result.get("recommendation")
+        score_flags = score_result.get("flags") or []
         from sqlalchemy import func as sqlfunc2
         job.confidence_score = confidence
         job.updated_at       = sqlfunc2.now()
         db.commit()
 
-        # Route to NEEDS_REVIEW if confidence < 0.80 or document not authentic
-        if confidence is not None and confidence < 0.80:
-            log.warning("job_id=%s confidence=%.2f below threshold → NEEDS_REVIEW", job_id, confidence)
-            _set_job_status(db, job, JobStatus.NEEDS_REVIEW)
-            record_job_outcome("needs_review")
-        elif job.authentic is False:
-            log.warning("job_id=%s authentic=False → NEEDS_REVIEW", job_id)
-            _set_job_status(db, job, JobStatus.NEEDS_REVIEW)
+        # Trust the scorer's recommendation — it already accounts for hard-stops
+        # like INSUFFICIENT_HISTORY where confidence may still be high but the
+        # application can't be auto-approved.
+        needs_review = (
+            recommendation == "NEEDS_REVIEW"
+            or confidence is None
+            or job.authentic is False
+        )
+
+        if needs_review:
+            reason = _summarize_review_reason(score_flags, confidence, job.authentic)
+            log.warning(
+                "job_id=%s routing to NEEDS_REVIEW (confidence=%s, flags=%s)",
+                job_id, confidence, score_flags,
+            )
+            _set_job_status(db, job, JobStatus.NEEDS_REVIEW, error_message=reason)
             record_job_outcome("needs_review")
         else:
+            log.info("job_id=%s status=SUCCEEDED (confidence=%.2f)", job_id, confidence)
             _set_job_status(db, job, JobStatus.SUCCEEDED)
             record_job_outcome("succeeded")
+        
+        log.info("job_id=%s extract step complete - pipeline finished", job_id)
         record_step("extract", time.time() - start)
-        log.info("job_id=%s status=%s confidence=%s", job_id, job.status, confidence)
+        _cleanup_raw_artifacts(storage, doc_id)
 
     except Exception as exc:
         log.exception("job_id=%s extract failed: %s", job_id, exc)
         record_step("extract", time.time() - start)
         record_step_failure("extract")
         record_job_outcome("failed")
-        if isinstance(exc, ValueError) and "PII scan" in str(exc):
+        is_pii_block = isinstance(exc, ValueError) and "PII scan" in str(exc)
+        if is_pii_block:
             record_pii_leak_block()
+        
+        retries_left = self.max_retries - self.request.retries
+        if is_pii_block or retries_left <= 0:
+            _cleanup_or_warn(doc_id)
+        
         try:
             job = db.get(Job, job_id)
             if job:
-                _set_job_status(db, job, JobStatus.FAILED, error_message=str(exc)[:1024])
+                _set_job_status(db, job, JobStatus.FAILED, error_message=f"[extract] {exc}"[:1024])
         except Exception:
             pass
-        # PII scan failures are hard stops — don't retry, don't risk propagation.
-        # JSON parse errors and API timeouts are transient — retry those.
-        is_pii_block = isinstance(exc, ValueError) and "PII scan" in str(exc)
+        
         if not is_pii_block:
             raise self.retry(exc=exc)
         raise

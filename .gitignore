@@ -2,6 +2,9 @@
 docs/build/
 docs/_build/
 
+# Streamlit secrets — never commit (use secrets.toml.example as template)
+.streamlit/secrets.toml
+
 # Sensitive data — never commit
 tests/fixtures/*.pdf
 tests/fixtures/*.csv
@@ -20,6 +23,9 @@ redacted_ssn.txt
 # Mac metadata
 .DS_Store
 **/.DS_Store
+
+# Office app lock files (PowerPoint / Word transient artifacts)
+~$*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

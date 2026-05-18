@@ -1,22 +1,29 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from sqlalchemy.orm import Session
+import json
+from typing import Any
 from uuid import UUID
 
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
 from app.db import get_db
-from app.models import Document, Job, JobStatus
+from app.guardrails import validate_upload
+from app.models import Batch, Document, Job, JobStatus
 from app.schemas import (
+    BatchCreateResponse,
+    BatchDecisionResponse,
+    BatchStatusResponse,
     DocumentCreate,
     DocumentCreateResponse,
     JobStatusResponse,
-    DocumentUploadResponse,
-    ReviewQueueItem,
+    PerDocumentSummary,
     ReviewDecision,
+    ReviewQueueItem,
     ReviewResponse,
 )
-from app.storage import MINIO_BUCKET, ensure_bucket, get_minio_client
-from app.guardrails import validate_upload
+from app.storage import BUCKET_NAME, ensure_bucket, get_storage_client
 
 router = APIRouter()
 
@@ -41,7 +48,8 @@ def upload_document(
 ):
     validate_upload(file)
 
-    from app.worker import parse_document
+    from app.worker import parse_document, classify_document, authenticate_document, redact_document, extract_document
+    from celery import chain
 
     content_type = file.content_type or "application/pdf"
 
@@ -51,18 +59,17 @@ def upload_document(
 
     job = Job(document_id=doc.id, status=JobStatus.QUEUED)
     db.add(job)
-    db.flush()  # get IDs without committing yet
+    db.flush()
 
-    # Upload to MinIO before committing.
-    # Seek to end to measure size, then rewind for the actual upload.
+    # Upload to storage
     raw_key = f"raw/{doc.id}/{file.filename}"
-    minio = get_minio_client()
-    ensure_bucket(minio)
+    storage = get_storage_client()
+    ensure_bucket(storage)
     file.file.seek(0, 2)
     file_size = file.file.tell()
     file.file.seek(0)
-    minio.put_object(
-        MINIO_BUCKET,
+    storage.put_object(
+        BUCKET_NAME,
         raw_key,
         file.file,
         length=file_size,
@@ -71,22 +78,433 @@ def upload_document(
 
     db.commit()
 
-    # Enqueue parse → redact → extract chain after committing so workers can find the records.
-    # .si() (immutable signature) ensures the None return of each step is not forwarded
-    # to the next, so each task receives only its own explicit arguments.
     try:
-        from celery import chain
-        from app.worker import authenticate_document, redact_document, extract_document
         chain(
             parse_document.s(str(job.id), str(doc.id), file.filename),
+            classify_document.si(str(job.id), str(doc.id)),
             authenticate_document.si(str(job.id), str(doc.id), file.filename),
             redact_document.si(str(job.id), str(doc.id)),
             extract_document.si(str(job.id), str(doc.id)),
         ).apply_async()
     except Exception as exc:
+        job.status = JobStatus.FAILED
+        job.error_message = f"Enqueue failed: {str(exc)[:200]}"
+        job.updated_at = func.now()
+        db.commit()
         raise HTTPException(status_code=503, detail=f"Failed to enqueue pipeline: {exc}")
 
     return DocumentCreateResponse(document_id=doc.id, job_id=job.id, status=job.status.value)
+
+
+@router.post("/batches/upload", response_model=BatchCreateResponse)
+def upload_batch(
+    files: list[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+):
+    """
+    Industry-ready batch upload: processes multiple documents in a single
+    logical transaction. Returns a batch_id to track the collective status.
+    """
+    from celery import chain
+    from app.worker import (
+        parse_document, classify_document, authenticate_document,
+        redact_document, extract_document
+    )
+
+    batch = Batch()
+    db.add(batch)
+    db.flush()
+
+    storage = get_storage_client()
+    ensure_bucket(storage)
+
+    responses = []
+
+    import hashlib
+    
+    # Track hashes to detect duplicates
+    seen_hashes = set()
+    
+    # Business rule: Must have bank statement AND paystub for auto-approval.
+    doc_types_seen = set()
+    
+    for file in files:
+        # Generate hash for deduplication
+        file_content = file.file.read()
+        file_hash = hashlib.sha256(file_content).hexdigest()
+        file.file.seek(0)
+        
+        if file_hash in seen_hashes:
+            raise HTTPException(status_code=422, detail=f"Duplicate file detected: {file.filename}")
+        seen_hashes.add(file_hash)
+        
+        # Simple heuristic for type
+        if "bank" in file.filename.lower(): doc_types_seen.add("bank_statement")
+        elif "pay" in file.filename.lower(): doc_types_seen.add("paystub")
+    
+    requirements_met = "bank_statement" in doc_types_seen and "paystub" in doc_types_seen
+
+    for file in files:
+        validate_upload(file)
+        content_type = file.content_type or "application/pdf"
+
+        # Create doc
+        doc = Document(batch_id=batch.id, filename=file.filename, content_type=content_type)
+        db.add(doc)
+        db.flush()
+
+        # Create job
+        job = Job(document_id=doc.id, status=JobStatus.QUEUED)
+        if not requirements_met:
+            job.error_message = "Missing required documents: Need both Bank Statement and Paystub."
+            job.status = JobStatus.NEEDS_REVIEW
+        
+        db.add(job)
+        db.flush()
+
+        # Upload to storage
+        raw_key = f"raw/{doc.id}/{file.filename}"
+        file.file.seek(0, 2)
+        file_size = file.file.tell()
+        file.file.seek(0)
+
+        storage.put_object(
+            BUCKET_NAME,
+            raw_key,
+            file.file,
+            length=file_size,
+            content_type=content_type,
+        )
+
+        # Commit DB changes for this specific job before enqueuing
+        db.commit()
+
+        # Skip the pipeline entirely when the application is missing required
+        # documents — the job stays in NEEDS_REVIEW so an officer can chase the
+        # customer for the missing piece. Running parse/classify/extract on an
+        # incomplete set would just clobber NEEDS_REVIEW back to SUCCEEDED.
+        if not requirements_met:
+            responses.append(DocumentCreateResponse(
+                document_id=doc.id,
+                job_id=job.id,
+                status=job.status.value
+            ))
+            continue
+
+        try:
+            chain(
+                parse_document.s(str(job.id), str(doc.id), file.filename),
+                classify_document.si(str(job.id), str(doc.id)),
+                authenticate_document.si(str(job.id), str(doc.id), file.filename),
+                redact_document.si(str(job.id), str(doc.id)),
+                extract_document.si(str(job.id), str(doc.id)),
+            ).apply_async()
+        except Exception as exc:
+            job.status = JobStatus.FAILED
+            job.error_message = f"Enqueue failed: {str(exc)[:200]}"
+            job.updated_at = func.now()
+            db.commit()
+
+        responses.append(DocumentCreateResponse(
+            document_id=doc.id,
+            job_id=job.id,
+            status=job.status.value
+        ))
+
+    return BatchCreateResponse(batch_id=batch.id, jobs=responses)
+
+
+@router.get("/batches/{batch_id}", response_model=BatchStatusResponse)
+def get_batch_status(batch_id: UUID, db: Session = Depends(get_db)):
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    job_statuses = []
+    for doc in batch.documents:
+        job = db.query(Job).filter(Job.document_id == doc.id).order_by(Job.created_at.desc()).first()
+        if job:
+            job_statuses.append(JobStatusResponse(
+                job_id=job.id,
+                document_id=doc.id,
+                filename=doc.filename,
+                status=job.status.value,
+                error_message=job.error_message,
+                created_at=job.created_at,
+                updated_at=job.updated_at,
+            ))
+
+    # Aggregate status
+    statuses = [j.status for j in job_statuses]
+    if not statuses:
+        aggregate = "EMPTY"
+    elif "FAILED" in statuses:
+        aggregate = "FAILED"
+    elif "RUNNING" in statuses or "QUEUED" in statuses:
+        aggregate = "RUNNING"
+    elif "NEEDS_REVIEW" in statuses:
+        aggregate = "NEEDS_REVIEW"
+    else:
+        aggregate = "SUCCEEDED"
+
+    return BatchStatusResponse(
+        batch_id=batch.id,
+        status=aggregate,
+        jobs=job_statuses,
+        created_at=batch.created_at
+    )
+
+
+@router.get("/batches/{batch_id}/decision", response_model=BatchDecisionResponse)
+def get_batch_decision(batch_id: UUID, db: Session = Depends(get_db)):
+    """
+    Application-level decision for a batch.
+
+    Per-document scores are useful for authenticity / integrity, but the
+    lending recommendation has to look at the application as a whole — the
+    paystub supplies income, the bank statement supplies risk signals, and
+    they only make sense together. This endpoint merges the per-document
+    extractions into one application profile and runs the deterministic
+    scorecard once over it.
+    """
+    from app.aggregator import (
+        merge_extractions, merge_auth_reports, completeness_signals,
+    )
+    from app.scorer import compute_score
+
+    batch = db.get(Batch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    storage = get_storage_client()
+
+    def _fetch(key: str):
+        try:
+            data = storage.get_object(BUCKET_NAME, key)
+            return json.loads(data.read().decode("utf-8"))
+        except Exception:
+            return None
+
+    extractions: list[dict] = []
+    auth_reports: list[dict] = []
+    per_document: list[PerDocumentSummary] = []
+    statuses: list[str] = []
+
+    for doc in batch.documents:
+        job = (
+            db.query(Job)
+            .filter(Job.document_id == doc.id)
+            .order_by(Job.created_at.desc())
+            .first()
+        )
+        if not job:
+            continue
+        statuses.append(job.status.value)
+
+        doc_id = str(doc.id)
+        extraction = _fetch(f"extracted/{doc_id}/extraction.json")
+        auth = _fetch(f"authenticated/{doc_id}/authenticity_report.json")
+        score_b = _fetch(f"extracted/{doc_id}/score_breakdown.json")
+
+        if extraction:
+            extractions.append(extraction)
+        if auth:
+            auth_reports.append(auth)
+
+        per_document.append(PerDocumentSummary(
+            job_id=job.id,
+            filename=doc.filename,
+            status=job.status.value,
+            document_type=(extraction or {}).get("document_type"),
+            score=(score_b or {}).get("score"),
+            flags=(score_b or {}).get("flags") or [],
+        ))
+
+    if "FAILED" in statuses:
+        agg = "FAILED"
+    elif "RUNNING" in statuses or "QUEUED" in statuses:
+        agg = "RUNNING"
+    elif "NEEDS_REVIEW" in statuses:
+        agg = "NEEDS_REVIEW"
+    elif statuses:
+        agg = "SUCCEEDED"
+    else:
+        agg = "EMPTY"
+
+    profile = merge_extractions(extractions) if extractions else None
+    combined_auth = merge_auth_reports(auth_reports) if auth_reports else None
+    combined_score = None
+
+    if profile and combined_auth:
+        combined_score = compute_score(profile, combined_auth)
+        # Annotate the breakdown with which document supplied the income figure
+        # and which document set was received — both are part of the audit trail.
+        income_source = profile.get("income_source_document")
+        if income_source:
+            combined_score.setdefault("breakdown", []).insert(0, {
+                "code": "INCOME_SOURCE",
+                "category": "provenance",
+                "points_earned": 0,
+                "points_possible": 0,
+                "severity": "none",
+                "detail": f"Income figure sourced from {income_source}",
+            })
+        completeness = completeness_signals(profile)
+        for code in completeness:
+            severity = "none" if code == "DOC_SET_COMPLETE" else "medium"
+            combined_score.setdefault("breakdown", []).insert(0, {
+                "code": code,
+                "category": "completeness",
+                "points_earned": 0,
+                "points_possible": 0,
+                "severity": severity,
+                "detail": (
+                    "Both income and bank-statement evidence provided"
+                    if code == "DOC_SET_COMPLETE"
+                    else "Document set is incomplete for full underwriting"
+                ),
+            })
+            if code != "DOC_SET_COMPLETE":
+                combined_score.setdefault("flags", []).append(code)
+
+    return BatchDecisionResponse(
+        batch_id=batch.id,
+        status=agg,
+        application_profile=profile,
+        combined_score=combined_score,
+        combined_authenticity=combined_auth,
+        per_document=per_document,
+    )
+
+
+@router.get("/metrics/dashboard")
+def dashboard_metrics(db: Session = Depends(get_db)):
+    """
+    Aggregate metrics for the officer dashboard. Built from the jobs table —
+    no Prometheus dependency, so the demo UI can render without scraping.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    status_counts: dict[str, int] = {s.value: 0 for s in JobStatus}
+    rows = (
+        db.query(Job.status, func.count(Job.id))
+        .group_by(Job.status)
+        .all()
+    )
+    for status, count in rows:
+        status_counts[status.value] = int(count)
+
+    total_jobs = sum(status_counts.values())
+    terminal = (
+        status_counts["SUCCEEDED"]
+        + status_counts["FAILED"]
+        + status_counts["NEEDS_REVIEW"]
+    )
+
+    pii_total = db.query(func.coalesce(func.sum(Job.entity_count), 0)).scalar() or 0
+    avg_confidence = db.query(func.avg(Job.confidence_score)).scalar()
+    avg_auth_confidence = db.query(func.avg(Job.auth_confidence)).scalar()
+
+    auth_pass = db.query(func.count(Job.id)).filter(Job.authentic.is_(True)).scalar() or 0
+    auth_total = db.query(func.count(Job.id)).filter(Job.authentic.isnot(None)).scalar() or 0
+    auth_pass_rate = (auth_pass / auth_total) if auth_total else None
+
+    auto_approved = (
+        db.query(func.count(Job.id))
+        .filter(Job.status == JobStatus.SUCCEEDED, Job.review_status.is_(None))
+        .scalar() or 0
+    )
+    auto_approval_rate = (auto_approved / terminal) if terminal else None
+
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    processed_24h = (
+        db.query(func.count(Job.id))
+        .filter(Job.created_at >= since)
+        .scalar() or 0
+    )
+
+    # ── Volume over time (last 14 days) ──────────────────────────────────────
+    fourteen_days_ago = datetime.now(timezone.utc) - timedelta(days=14)
+    daily_rows = (
+        db.query(
+            func.date(Job.created_at).label("day"),
+            func.count(Job.id).label("count"),
+        )
+        .filter(Job.created_at >= fourteen_days_ago)
+        .group_by(func.date(Job.created_at))
+        .order_by(func.date(Job.created_at))
+        .all()
+    )
+    volume_over_time = [
+        {"day": str(row.day), "count": int(row.count)} for row in daily_rows
+    ]
+
+    # ── Document type mix ────────────────────────────────────────────────────
+    doc_type_rows = (
+        db.query(Job.document_type, func.count(Job.id))
+        .filter(Job.document_type.isnot(None))
+        .group_by(Job.document_type)
+        .all()
+    )
+    document_type_mix = [
+        {"document_type": dt, "count": int(c)} for dt, c in doc_type_rows
+    ]
+
+    # ── Confidence score distribution (buckets of 0.10) ──────────────────────
+    bucket_labels = [
+        "0.0–0.1", "0.1–0.2", "0.2–0.3", "0.3–0.4", "0.4–0.5",
+        "0.5–0.6", "0.6–0.7", "0.7–0.8", "0.8–0.9", "0.9–1.0",
+    ]
+    confidence_buckets = {label: 0 for label in bucket_labels}
+    scores = (
+        db.query(Job.confidence_score)
+        .filter(Job.confidence_score.isnot(None))
+        .all()
+    )
+    for (score,) in scores:
+        idx = min(int(score * 10), 9)
+        confidence_buckets[bucket_labels[idx]] += 1
+    confidence_distribution = [
+        {"bucket": k, "count": v} for k, v in confidence_buckets.items()
+    ]
+
+    # ── Top PII types redacted (split the comma-separated string) ────────────
+    pii_type_counts: dict[str, int] = {}
+    pii_rows = (
+        db.query(Job.pii_types_found)
+        .filter(Job.pii_types_found.isnot(None))
+        .all()
+    )
+    for (types_str,) in pii_rows:
+        for t in types_str.split(","):
+            t = t.strip()
+            if t:
+                pii_type_counts[t] = pii_type_counts.get(t, 0) + 1
+    pii_types = [
+        {"pii_type": k, "count": v}
+        for k, v in sorted(pii_type_counts.items(), key=lambda kv: kv[1], reverse=True)
+    ]
+
+    return {
+        "totals": {
+            "all_jobs": total_jobs,
+            "processed_24h": int(processed_24h),
+            "pii_entities_redacted": int(pii_total),
+        },
+        "status_counts": status_counts,
+        "rates": {
+            "auto_approval_rate": auto_approval_rate,
+            "auth_pass_rate": auth_pass_rate,
+            "avg_confidence": float(avg_confidence) if avg_confidence is not None else None,
+            "avg_auth_confidence": float(avg_auth_confidence) if avg_auth_confidence is not None else None,
+        },
+        "charts": {
+            "volume_over_time": volume_over_time,
+            "document_type_mix": document_type_mix,
+            "confidence_distribution": confidence_distribution,
+            "pii_types": pii_types,
+        },
+    }
 
 
 @router.get("/jobs/review", response_model=list[ReviewQueueItem])
@@ -118,21 +536,12 @@ def list_review_queue(db: Session = Depends(get_db)):
 
 @router.post("/jobs/{job_id}/review", response_model=ReviewResponse)
 def submit_review(job_id: UUID, payload: ReviewDecision, db: Session = Depends(get_db)):
-    """
-    Approve or reject a NEEDS_REVIEW job.
-    - approved → status becomes SUCCEEDED
-    - rejected → status becomes FAILED
-    """
-    if payload.decision not in ("approved", "rejected"):
-        raise HTTPException(status_code=400, detail="decision must be 'approved' or 'rejected'")
-
     job = db.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if job.status != JobStatus.NEEDS_REVIEW:
         raise HTTPException(status_code=409, detail=f"Job is not in NEEDS_REVIEW state (current: {job.status.value})")
 
-    from sqlalchemy import func
     job.review_status = payload.decision
     job.status = JobStatus.SUCCEEDED if payload.decision == "approved" else JobStatus.FAILED
     if payload.decision == "rejected" and payload.notes:
@@ -141,6 +550,80 @@ def submit_review(job_id: UUID, payload: ReviewDecision, db: Session = Depends(g
     db.commit()
 
     return ReviewResponse(job_id=job.id, status=job.status.value, review_status=job.review_status)
+
+
+@router.get("/jobs/{job_id}/results")
+def get_job_results(job_id: UUID, db: Session = Depends(get_db)):
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    from app.models import Document
+    doc = db.get(Document, job.document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    doc_id = str(doc.id)
+    storage = get_storage_client()
+    result: dict[str, Any] = {}
+
+    def _fetch(key: str):
+        try:
+            data = storage.get_object(BUCKET_NAME, key)
+            return json.loads(data.read().decode("utf-8"))
+        except Exception:
+            return None
+
+    extraction = _fetch(f"extracted/{doc_id}/extraction.json")
+    if extraction:
+        result["extraction"] = extraction
+
+    score = _fetch(f"extracted/{doc_id}/score_breakdown.json")
+    if score:
+        result["score_breakdown"] = score
+
+    auth = _fetch(f"authenticated/{doc_id}/authenticity_report.json")
+    if auth:
+        result["authenticity_report"] = auth
+
+    redaction = _fetch(f"redacted/{doc_id}/redaction_report.json")
+    if redaction:
+        result["redaction_report"] = redaction
+
+    if not result:
+        raise HTTPException(status_code=404, detail="No results available yet")
+
+    return result
+
+
+@router.get("/jobs/{job_id}/redacted-preview")
+def get_redacted_preview(job_id: UUID, db: Session = Depends(get_db)):
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    from app.models import Document
+    doc = db.get(Document, job.document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    doc_id = str(doc.id)
+    storage = get_storage_client()
+
+    try:
+        data = storage.get_object(BUCKET_NAME, f"redacted/{doc_id}/redacted.txt")
+        redacted_text = data.read().decode("utf-8")
+    except Exception:
+        raise HTTPException(status_code=404, detail="Redacted text not yet available")
+
+    redaction_report = []
+    try:
+        data = storage.get_object(BUCKET_NAME, f"redacted/{doc_id}/redaction_report.json")
+        redaction_report = json.loads(data.read().decode("utf-8"))
+    except Exception:
+        pass
+
+    return {"redacted_text": redacted_text, "redaction_report": redaction_report}
 
 
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)

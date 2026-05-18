@@ -191,8 +191,11 @@ check("Audit trail is not empty",
       len(audit) > 0,
       f"got {len(audit)} entries")
 check("Audit entries have required keys",
-      all("entity_type" in e and "original_value" in e for e in audit),
+      all("entity_type" in e and "start" in e and "char_count" in e for e in audit),
       f"keys: {[list(e.keys()) for e in audit]}")
+check("Audit entries do not store original PII value",
+      all("original_value" not in e for e in audit),
+      "original_value must not appear in redaction report (data minimization)")
 print(f"        → Entities found: {[e['entity_type'] for e in audit]}")
 print(f"        → Redacted: {redacted.strip()}")
 

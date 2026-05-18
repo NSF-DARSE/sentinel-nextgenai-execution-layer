@@ -28,7 +28,9 @@ _ENTITY_KEY     = "sentinel:entities:{}"
 _JOBS_KEY       = "sentinel:jobs:{}"        # succeeded / failed
 _PII_BLOCK_KEY  = "sentinel:pii_leak_blocks"
 
-PIPELINE_STEPS = ["parse", "authenticate", "redact", "extract"]
+PIPELINE_STEPS = ["parse", "classify", "authenticate", "redact", "extract"]
+
+_CLASSIFY_REJECTED_KEY = "sentinel:classify_rejected_total"
 
 
 class SentinelJobCollector(Collector):
@@ -134,6 +136,15 @@ class SentinelWorkerCollector(Collector):
                     fail_metric.add_metric([step], float(val))
             yield fail_metric
 
+            # ── Classify rejections ──────────────────────────────────────
+            classify_val = r.get(_CLASSIFY_REJECTED_KEY)
+            g = GaugeMetricFamily(
+                "sentinel_classify_rejected_total",
+                "Documents rejected by the relevance classifier (non-financial docs)",
+            )
+            g.add_metric([], float(classify_val) if classify_val else 0.0)
+            yield g
+
             # ── PII leak blocks ──────────────────────────────────────────
             pii_val = r.get(_PII_BLOCK_KEY)
             g = GaugeMetricFamily(
@@ -189,6 +200,16 @@ def record_step_failure(step: str) -> None:
         r.incr(_STEP_FAIL_KEY.format(step))
     except Exception:
         log.warning("Failed to record step failure metric: %s", step)
+
+
+def record_classify_rejection() -> None:
+    """Called when the relevance classifier rejects a non-financial document."""
+    try:
+        import redis
+        r = redis.from_url(REDIS_URL, decode_responses=True)
+        r.incr(_CLASSIFY_REJECTED_KEY)
+    except Exception:
+        log.warning("Failed to record classify rejection metric")
 
 
 def record_pii_leak_block() -> None:

@@ -1,21 +1,5 @@
 """
-extractor.py — LLM-based structured extraction from redacted financial text.
-
-Contract:
-  - Input:  redacted text (PII already replaced with typed placeholders).
-  - Output: structured JSON risk profile.
-  - Guarantee: the LLM NEVER receives raw PII.  Redaction runs before this
-               module is called — enforced by the pipeline, not by trust.
-
-Current backend: Anthropic Claude via the Claude API.
-  - Set ANTHROPIC_API_KEY in your .env / docker-compose.yml
-  - Structured output is enforced via tool_use with a fixed input_schema —
-    the model is constrained to return only the fields defined in the schema.
-
-After Claude responds, an output PII scan checks the raw response string for
-structured PII patterns (SSN, email, phone, account numbers) before the result
-is parsed or stored.  Any hit aborts extraction and fails the job — preventing
-downstream propagation of a redaction miss.
+extractor.py — LLM-based structured extraction from redacted financial text via Vertex AI.
 """
 from __future__ import annotations
 
@@ -25,22 +9,23 @@ import os
 import re
 from typing import Any
 
-import anthropic
+import vertexai
+from vertexai.generative_models import GenerativeModel, GenerationConfig
 
 log = logging.getLogger(__name__)
 
 # ── Versioning ────────────────────────────────────────────────────────────────
-# Bump PROMPT_VERSION when the prompt or schema changes so the audit trail
-# records which version produced each extraction result.
-PROMPT_VERSION = "v3.0"
+PROMPT_VERSION = "v5.1-vertex"
+MODEL_NAME = "gemini-2.5-flash"
 
-MODEL = "claude-sonnet-4-6"
+PROJECT_ID = os.getenv("GCP_PROJECT_ID", "bestegg-cisc867010s26")
+LOCATION = os.getenv("GCP_LOCATION", "us-central1")
 
-# ── Tool schema (enforces structured output via tool_use) ─────────────────────
-# The schema is intentionally narrow: no field can hold a name, raw account
-# number, or SSN. The schema itself acts as a guardrail — Claude cannot
-# reproduce PII that the schema has no slot for.
-_TOOL_SCHEMA: dict[str, Any] = {
+# Initialize Vertex AI once
+vertexai.init(project=PROJECT_ID, location=LOCATION)
+
+# ── Response schema (enforces structured JSON output) ─────────────────────────
+_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "document_type": {
@@ -49,18 +34,21 @@ _TOOL_SCHEMA: dict[str, Any] = {
             "description": "Classified document type."
         },
         "analysis_period": {
-            "type": ["string", "null"],
+            "type": "string",
+            "nullable": True,
             "description": "Date range or tax year covered by the document."
         },
         "income": {
             "type": "object",
             "properties": {
                 "monthly_net_estimated": {
-                    "type": ["number", "null"],
+                    "type": "number",
+                    "nullable": True,
                     "description": "Estimated monthly net income in USD. For annual docs (w2/tax_return), divide annual figure by 12."
                 },
                 "annual_gross": {
-                    "type": ["number", "null"],
+                    "type": "number",
+                    "nullable": True,
                     "description": "Annual gross income in USD. Populate for w2 and tax_return only."
                 },
                 "sources": {
@@ -79,11 +67,19 @@ _TOOL_SCHEMA: dict[str, Any] = {
             "type": "object",
             "description": "Balance data. Populate only for bank_statement; set all fields to null for other types.",
             "properties": {
-                "opening_balance": {"type": ["number", "null"]},
-                "closing_balance": {"type": ["number", "null"]},
-                "average_daily_balance_estimated": {"type": ["number", "null"]}
+                "opening_balance": {"type": "number", "nullable": True},
+                "closing_balance": {"type": "number", "nullable": True},
+                "average_daily_balance_estimated": {"type": "number", "nullable": True},
+                "statement_period_months": {
+                    "type": "integer",
+                    "nullable": True,
+                    "description": "Number of distinct calendar months the bank statement covers. Null for non-bank-statement types."
+                }
             },
-            "required": ["opening_balance", "closing_balance", "average_daily_balance_estimated"]
+            "required": [
+                "opening_balance", "closing_balance",
+                "average_daily_balance_estimated", "statement_period_months"
+            ]
         },
         "risk_flags": {
             "type": "object",
@@ -113,8 +109,9 @@ _TOOL_SCHEMA: dict[str, Any] = {
                     "description": "True if the document contains mathematical inconsistencies, self-labels as doctored/fraudulent, or has self-contradictory figures."
                 },
                 "notes": {
-                    "type": ["string", "null"],
-                    "description": "Free-text explanation of any flags raised, or null if none."
+                    "type": "string",
+                    "nullable": True,
+                    "description": "Free-text explanation of any flags raised, or null if none. Use professional prose with proper spacing between words and sentences."
                 }
             },
             "required": [
@@ -130,20 +127,16 @@ _TOOL_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "properties": {
                     "category": {"type": "string"},
-                    "average_monthly_amount": {"type": ["number", "null"]},
+                    "average_monthly_amount": {"type": "number", "nullable": True},
                     "frequency": {"type": "string", "enum": ["weekly", "biweekly", "monthly", "irregular"]}
                 },
                 "required": ["category", "frequency"]
             }
         },
-        "confidence_score": {
-            "type": "number",
-            "description": "0.0–1.0. Use 0.90+ for clean fully-populated docs; 0.80–0.89 for minor gaps; 0.50–0.79 for significant missing fields; below 0.50 if document_integrity_flag is true or type is unknown."
-        }
     },
     "required": [
         "document_type", "income", "account_summary",
-        "risk_flags", "recurring_expenses", "confidence_score"
+        "risk_flags", "recurring_expenses"
     ]
 }
 
@@ -156,8 +149,8 @@ Personal identifiers — names, account numbers, SSNs, addresses, phone numbers 
 have been replaced with typed placeholders such as [PERSON], [US_SSN],
 [ACCOUNT_NUMBER], [LOCATION], [PHONE_NUMBER].
 
-Your task: call the extract_financial_profile tool with the structured risk profile
-extracted from the document. You must always call the tool — never respond in plain text.
+Your task: return a structured JSON risk profile extracted from the document.
+You must always return valid JSON matching the schema exactly — never respond in plain text.
 
 DOCUMENT TYPE RULES:
 - "bank_statement": monthly account activity with transaction history, opening/closing balances.
@@ -172,6 +165,9 @@ INCOME EXTRACTION:
 - tax_return: annual_gross = AGI; monthly_net_estimated = annual_gross / 12; frequency = "annual".
 
 ACCOUNT SUMMARY: populate for bank_statement only; set all fields to null for other types.
+For bank_statement, set statement_period_months to the number of distinct calendar months
+the statement covers (e.g., a statement labeled "Mar 1 – May 31" covers 3 months; a single
+month statement is 1). Count from the statement period header, not from transaction dates.
 
 RISK FLAGS for non-bank-statement types: set all count/boolean flags to 0/false — they are not observable from this document.
 
@@ -194,98 +190,49 @@ _OUTPUT_PII_PATTERNS: list[tuple[str, str]] = [
     ("ROUTING",        r"(?i)(?:routing|aba|rtn)[^\d]{0,10}\d{9}\b"),
 ]
 
-
 def _scan_output_for_pii(response_text: str) -> list[str]:
     warnings: list[str] = []
     for label, pattern in _OUTPUT_PII_PATTERNS:
-        match = re.search(pattern, response_text)
-        if match:
-            warnings.append(
-                f"Potential {label} found in LLM output: '{match.group()[:30]}'"
-            )
+        matches = re.findall(pattern, response_text)
+        for match in matches:
+            warnings.append(f"Potential {label} found in LLM output: '{match[:30]}'")
     return warnings
-
 
 def extract_from_redacted(redacted_text: str) -> dict[str, Any]:
     """
-    Send *redacted_text* to Claude and return a parsed risk profile dict.
-
-    Uses tool_use with a fixed input_schema to enforce structured output —
-    Claude is constrained to populate only the fields defined in _TOOL_SCHEMA.
-
-    Raises:
-        RuntimeError — if ANTHROPIC_API_KEY is not set.
-        ValueError   — if the output PII scan finds leaked structured PII.
-        RuntimeError — if Claude does not return a tool_use block.
-        RuntimeError — on API errors.
+    Send *redacted_text* to Vertex AI Gemini and return a parsed risk profile dict.
     """
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY environment variable is not set. "
-            "Add it to your .env file."
-        )
+    log.info("Calling Vertex AI model=%s project=%s", MODEL_NAME, PROJECT_ID)
 
-    client = anthropic.Anthropic(api_key=api_key)
-
-    log.info("Calling Claude model=%s prompt_version=%s", MODEL, PROMPT_VERSION)
-
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=4096,
-        system=_SYSTEM_PROMPT,
-        tools=[{
-            "name": "extract_financial_profile",
-            "description": "Extract a structured financial risk profile from the redacted document text.",
-            "input_schema": _TOOL_SCHEMA,
-        }],
-        tool_choice={"type": "tool", "name": "extract_financial_profile"},
-        messages=[{
-            "role": "user",
-            "content": (
-                "Extract the financial risk profile from the following redacted document.\n\n"
-                f"{redacted_text}"
-            )
-        }],
+    # Use the constructor for system_instruction which is the standard for 
+    # google-cloud-aiplatform >= 1.46.0
+    model = GenerativeModel(
+        model_name=MODEL_NAME,
+        system_instruction=[_SYSTEM_PROMPT]
     )
 
-    usage = response.usage
-    log.info(
-        "Claude responded: model=%s input_tokens=%d output_tokens=%d stop_reason=%s",
-        MODEL,
-        usage.input_tokens if usage else -1,
-        usage.output_tokens if usage else -1,
-        response.stop_reason,
+    response = model.generate_content(
+        f"Extract the financial risk profile from the following redacted document.\n\n{redacted_text}",
+        generation_config=GenerationConfig(
+            response_mime_type="application/json",
+            response_schema=_RESPONSE_SCHEMA,
+        ),
     )
 
-    # Extract the tool_use block
-    tool_block = next(
-        (b for b in response.content if b.type == "tool_use"),
-        None,
-    )
-    if tool_block is None:
-        raise RuntimeError(
-            f"Claude did not return a tool_use block. stop_reason={response.stop_reason}"
-        )
+    raw_json = response.text
+    if not raw_json:
+        raise RuntimeError("Vertex AI returned an empty response.")
 
-    result: dict[str, Any] = tool_block.input
-
-    # ── Output PII scan ───────────────────────────────────────────────────────
-    raw_json = json.dumps(result)
     pii_warnings = _scan_output_for_pii(raw_json)
     if pii_warnings:
         log.error("OUTPUT PII SCAN FAILED — aborting extraction. Warnings: %s", pii_warnings)
-        raise ValueError(
-            f"LLM output PII scan detected potential data leak: {pii_warnings}. "
-            "Extraction aborted to prevent downstream propagation."
-        )
+        raise ValueError(f"LLM output PII scan detected potential data leak: {pii_warnings}")
 
-    # Stamp versioning metadata — stored separately in extraction_meta.json.
+    result: dict[str, Any] = json.loads(raw_json)
     result["_meta"] = {
-        "model": MODEL,
+        "model": MODEL_NAME,
         "prompt_version": PROMPT_VERSION,
-        "input_tokens": usage.input_tokens if usage else None,
-        "output_tokens": usage.output_tokens if usage else None,
+        "project_id": PROJECT_ID,
     }
 
     return result

@@ -19,14 +19,25 @@ class JobStatus(str, enum.Enum):
     NEEDS_REVIEW = "NEEDS_REVIEW"
 
 
+class Batch(Base):
+    __tablename__ = "batches"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+
+    documents: Mapped[list["Document"]] = relationship(back_populates="batch")
+
+
 class Document(Base):
     __tablename__ = "documents"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    batch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("batches.id"), index=True, nullable=True)
     filename: Mapped[str] = mapped_column(String(256))
     content_type: Mapped[str] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
 
+    batch: Mapped["Batch | None"] = relationship(back_populates="documents")
     jobs: Mapped[list["Job"]] = relationship(back_populates="document")
 
 

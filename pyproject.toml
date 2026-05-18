@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sentinel"
+version = "1.0.0"
+description = "AI-assisted, deterministic-decision underwriting pipeline for loan documents."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [
+    { name = "Karthikheyaa Kurra", email = "karth@udel.edu" },
+]
+keywords = ["fintech", "llm", "pii-redaction", "underwriting", "celery", "fastapi"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Office/Business :: Financial",
+]
+
+dependencies = [
+    "fastapi==0.129.0",
+    "uvicorn[standard]==0.41.0",
+    "SQLAlchemy==2.0.46",
+    "alembic~=1.14.0",
+    "psycopg[binary]==3.2.4",
+    "pydantic~=2.10.0",
+    "minio==7.2.15",
+    "google-cloud-storage==2.14.0",
+    "google-cloud-aiplatform>=1.46.0",
+    "python-multipart==0.0.22",
+    "celery[redis]==5.3.6",
+    "pdfplumber==0.11.4",
+    "presidio-analyzer==2.2.356",
+    "presidio-anonymizer==2.2.356",
+    "spacy==3.7.5",
+    "google-genai>=1.0.0",
+    "pypdf>=4.0.0",
+    "prometheus-fastapi-instrumentator==6.1.0",
+    "prometheus-client==0.20.0",
+    "redis==5.0.8",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "reportlab>=4.0",
+]
+frontend = [
+    "streamlit>=1.35.0",
+    "requests>=2.31.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Khey17/sentinel-nextgenai-execution-layer"
+Repository = "https://github.com/Khey17/sentinel-nextgenai-execution-layer"
+Issues = "https://github.com/Khey17/sentinel-nextgenai-execution-layer/issues"
+Changelog = "https://github.com/Khey17/sentinel-nextgenai-execution-layer/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+where = ["src/api"]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
